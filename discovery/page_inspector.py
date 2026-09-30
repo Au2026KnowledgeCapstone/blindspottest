@@ -27,6 +27,7 @@ Per-element keys, all optional except `id`, `tag` and `selector`:
     visible_label  <label> text, only when it disagrees with `label`
     placeholder    raw placeholder attribute
     text           visible text of buttons and links
+    href           resolved destination, links only
     value          current value; array for multi-select
     checked        true/false/"mixed" for checkboxes, radios, switches
     nearby_text    helper/validation/hint text near the element
@@ -358,6 +359,14 @@ _EXTRACT_JS = r"""
     if (tag === 'button' || role === 'button' || role === 'link') {
       text = textOf(el) || squash(el.getAttribute('value'));
       if (text) entry.text = text;
+    }
+
+    // Where a link goes, resolved against the document. A crawler needs this
+    // to decide whether following it leaves the region under test, which it
+    // has to know *before* clicking rather than after.
+    if (tag === 'a' && el.hasAttribute('href')) {
+      const raw = el.getAttribute('href');
+      if (raw && !raw.startsWith('javascript:')) entry.href = el.href;
     }
 
     const value = valueFor(el);
