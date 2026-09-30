@@ -4,7 +4,10 @@ PORT ?= 3000
 BASE := http://127.0.0.1:$(PORT)
 
 .DEFAULT_GOAL := help
-.PHONY: help install demo broken profile project edit all scan run pages watch dash rules inspect truth clean
+.PHONY: help install demo broken profile project edit all scan run pages watch dash rules inspect truth clean \
+        crawl crawl-broken crawl-stable map mermaid draw graph graph-diff
+
+GRAPHS := runs/graphs
 
 # Is something already listening on $(PORT)?
 UP := $(PY) -c "import socket,sys; sys.exit(0 if socket.socket().connect_ex(('127.0.0.1',$(PORT)))==0 else 1)"
@@ -31,10 +34,11 @@ endef
 
 help:  ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
-		| awk -F':.*?## ' '{printf "  \033[36m%-9s\033[0m %s\n", $$1, $$2}'
+		| awk -F':.*?## ' '{printf "  \033[36m%-13s\033[0m %s\n", $$1, $$2}'
 	@echo
-	@echo "  Start here:  make demo"
-	@echo "  Each scan starts and stops the demo app for you."
+	@echo "  Start here:  make demo        (scan one page for a regression)"
+	@echo "               make graph       (map the whole app and draw it)"
+	@echo "  Each target starts and stops the demo app for you."
 
 install:  ## Create the venv and install dependencies
 	python3 -m venv .venv
@@ -86,6 +90,46 @@ inspect:  ## Print a page snapshot: make inspect URL=... (no LLM)
 
 truth:  ## Print what each demo flow is and where its defect is (no browser)
 	$(PY) -m demo_app.manifest
+
+# --------------------------------------------------------------------------
+# Discovery — map the whole application instead of scanning one page
+#
+# The two builds are crawled separately and their graphs compared. Crawling
+# them together would merge two applications into one graph and destroy the
+# comparison they exist to support.
+# --------------------------------------------------------------------------
+
+crawl:  ## Map the sound build -> runs/graphs/graph_sound.json
+	$(call with_app, $(PY) -u -m discovery.crawler $(BASE) \
+	  --exclude /broken --out $(GRAPHS)/graph_sound.json $(ARGS))
+
+crawl-broken:  ## Map the broken build -> runs/graphs/graph_broken.json
+	$(call with_app, $(PY) -u -m discovery.crawler $(BASE) --entry /broken \
+	  --stay-under /broken --out $(GRAPHS)/graph_broken.json $(ARGS))
+
+crawl-stable:  ## Crawl twice and diff — proves state identity does not drift
+	$(call with_app, $(PY) -u -m discovery.crawler $(BASE) \
+	  --exclude /broken --repeat 2 --out $(GRAPHS)/graph_sound.json $(ARGS))
+
+map:  ## Print the app map an LLM would be shown (needs make crawl first)
+	@$(PY) -m discovery.projections $(GRAPHS)/graph_sound.json --view summary
+
+mermaid:  ## Print the graph as mermaid source
+	@$(PY) -m discovery.projections $(GRAPHS)/graph_sound.json --view mermaid
+
+draw:  ## Draw the graph you already crawled and open it (no re-crawl)
+	@test -f $(GRAPHS)/graph_sound.json \
+	  || { echo "no graph yet — run 'make crawl' first"; exit 2; }
+	@$(PY) -m discovery.projections $(GRAPHS)/graph_sound.json \
+	  --view html --out $(GRAPHS)/graph.html
+	@$(PY) -c "import webbrowser,pathlib; \
+	  p=pathlib.Path('$(GRAPHS)/graph.html').resolve(); \
+	  print('opening', p); webbrowser.open(p.as_uri())"
+
+graph: crawl draw  ## Map the app, draw it, and open the diagram
+
+graph-diff:  ## Compare the sound and broken graphs (needs both crawls)
+	@$(PY) -m discovery.compare $(GRAPHS)/graph_sound.json $(GRAPHS)/graph_broken.json
 
 clean:  ## Remove caches and run records
 	rm -rf runs __pycache__ */__pycache__

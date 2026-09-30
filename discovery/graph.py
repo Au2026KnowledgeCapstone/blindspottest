@@ -288,6 +288,12 @@ class AppGraph:
     # was not exhausted is the difference between "no path exists" and "I did
     # not look", and a closed-world claim depends on this being empty.
     unexplored: dict[str, list[str]] = field(default_factory=dict)
+    # Affordances deliberately not followed because they leave the region
+    # under test. Tracked apart from `unexplored` because they are a boundary
+    # rather than a gap: the model is complete for the region it claims, and
+    # counting a declared edge of the map as a hole in it would retract a
+    # closed-world claim that was actually earned.
+    out_of_region: dict[str, list[str]] = field(default_factory=dict)
 
     # -- construction ------------------------------------------------------
 
@@ -407,6 +413,7 @@ class AppGraph:
             "states": [s.to_dict() for s in self.states.values()],
             "actions": [a.to_dict() for a in self.actions],
             "unexplored": {k: v for k, v in self.unexplored.items() if v},
+            "out_of_region": {k: v for k, v in self.out_of_region.items() if v},
         }
 
     def save(self, path: Path | str) -> Path:
@@ -423,6 +430,7 @@ class AppGraph:
             states={s["id"]: State.from_dict(s) for s in data.get("states", [])},
             actions=[Action.from_dict(a) for a in data.get("actions", [])],
             unexplored=data.get("unexplored", {}),
+            out_of_region=data.get("out_of_region", {}),
         )
 
     @classmethod

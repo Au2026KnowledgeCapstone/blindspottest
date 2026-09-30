@@ -27,6 +27,9 @@ import json
 from collections import defaultdict
 
 from discovery.graph import Action, AppGraph, State
+from discovery.svg import SCRIPT as GRAPH_SCRIPT
+from discovery.svg import STYLE as GRAPH_STYLE
+from discovery.svg import render as render_svg
 
 # --------------------------------------------------------------------------
 # For the model
@@ -47,35 +50,65 @@ def _kind_counts(state: State) -> str:
     return " ".join(f"{kind}:{n}" for kind, n in sorted(counts.items()))
 
 
-def summary(graph: AppGraph, *, include_self_loops: bool = False) -> str:
+def summary(graph: AppGraph, *, include_self_loops: bool = False,
+            hoist_navigation: bool = True) -> str:
     """The whole application as a compact map, ~15 tokens per state.
 
     This is what a model is shown when the question spans the application:
     which capabilities exist, which states look like a confirmation, where a
     flow begins. Element-level detail is deliberately absent — it is
     available on request, and including it here would defeat the purpose.
+
+    Site-wide navigation is stated once rather than repeated under every
+    state. A sidebar of eight links across twenty states is 160 lines saying
+    the same thing, which buries the handful of transitions that actually
+    describe a flow — the exact opposite of what this projection is for.
     """
     lines: list[str] = [
         f"# application map  ({len(graph.states)} states, {len(graph.actions)} actions)",
         f"# entry: {graph.entry}",
-        "",
     ]
 
     by_source: dict[str, list[Action]] = defaultdict(list)
+    navigation: dict[tuple[str, str], None] = {}
+
     for action in graph.actions:
         if action.is_self_loop and not include_self_loops:
             continue
+        if hoist_navigation and action.inferred:
+            navigation[(action.label, action.target)] = None
+            continue
         by_source[action.source].append(action)
+
+    if navigation:
+        lines += ["", "# available from every state (site-wide navigation):"]
+        for label, target in sorted(navigation):
+            target_state = graph.states.get(target)
+            lines.append(
+                f"#   {label} -> {target} {_short(target_state) if target_state else ''}"
+            )
+
+    lines.append("")
 
     for state_id, state in sorted(graph.states.items(), key=lambda kv: kv[1].url_template):
         marker = "*" if state_id == graph.entry else " "
         lines.append(f"{marker}{state_id}  {_short(state)}  [{_kind_counts(state)}]")
+
+        # Two controls with the same text going to the same place (a header
+        # link and a sidebar link) are one fact about the application.
+        seen: set[tuple[str, str]] = set()
+        shown = 0
         for action in by_source.get(state_id, []):
+            pair = (action.label, action.target)
+            if pair in seen:
+                continue
+            seen.add(pair)
             target = graph.states.get(action.target)
             target_name = _short(target) if target else action.target
             lines.append(f"      --{action.label}--> {action.target} {target_name}")
-        if not by_source.get(state_id):
-            lines.append("      (terminal)")
+            shown += 1
+        if not shown:
+            lines.append("      (no transitions beyond site-wide navigation)")
 
     if not graph.is_closed():
         pending = sum(len(v) for v in graph.unexplored.values())
@@ -126,14 +159,35 @@ def token_estimate(text: str) -> int:
 # --------------------------------------------------------------------------
 
 
-def _node_label(state: State) -> str:
-    route = state.url_template or "/"
-    title = (state.title or "").split("—")[0].split("|")[0].strip()
+def _mermaid_text(text: str) -> str:
+    """Make text safe inside a quoted mermaid label.
+
+    Mermaid parses labels as HTML, so a route template like `/projects/<id>`
+    has its `<id>` swallowed as an unknown tag and the node renders as
+    `/projects/`. Escaping the angle brackets is what keeps the diagram
+    saying the same thing the graph does.
+    """
+    return (text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                .replace('"', "&quot;").replace("|", "/"))
+
+
+def _node_label(state: State, *, disambiguate: bool = False) -> str:
+    route = _mermaid_text(state.url_template or "/")
+    title = _mermaid_text((state.title or "").split("—")[0].split("|")[0].strip())
+    # Four distinct cart states all render as "/cart" and become impossible
+    # to tell apart, so collisions get a fragment of the fingerprint.
+    if disambiguate:
+        route = f"{route} <small>({state.id[2:6]})</small>"
     return f"{route}<br/><small>{title}</small>" if title else route
 
 
-def mermaid(graph: AppGraph, *, include_self_loops: bool = False) -> str:
+def mermaid(graph: AppGraph, *, include_self_loops: bool = False,
+            include_navigation: bool = False) -> str:
     """Mermaid flowchart source for the graph.
+
+    Site-wide navigation is omitted by default. Every state linking to every
+    other produces a diagram that is technically complete and visually
+    useless — the flows worth seeing disappear into a mesh of sidebar links.
 
     Parallel edges between the same pair are merged into one labelled with
     each action, because a purchase flow rendered with six separate arrows
@@ -142,9 +196,13 @@ def mermaid(graph: AppGraph, *, include_self_loops: bool = False) -> str:
     lines = ["flowchart TD"]
     ids = {state_id: f"n{i}" for i, state_id in enumerate(sorted(graph.states))}
 
+    route_counts: dict[str, int] = defaultdict(int)
+    for state in graph.states.values():
+        route_counts[state.url_template] += 1
+
     for state_id, state in sorted(graph.states.items()):
         node = ids[state_id]
-        label = _node_label(state).replace('"', "'")
+        label = _node_label(state, disambiguate=route_counts[state.url_template] > 1)
         shape = f'{node}(["{label}"])' if state_id == graph.entry else f'{node}["{label}"]'
         lines.append(f"    {shape}")
 
@@ -152,14 +210,15 @@ def mermaid(graph: AppGraph, *, include_self_loops: bool = False) -> str:
     for action in graph.actions:
         if action.is_self_loop and not include_self_loops:
             continue
+        if action.inferred and not include_navigation:
+            continue
         merged[(action.source, action.target)].append(action.label)
 
     for (source, target), labels in merged.items():
         if source not in ids or target not in ids:
             continue
         unique = list(dict.fromkeys(labels))
-        shown = " / ".join(unique[:3]) + ("…" if len(unique) > 3 else "")
-        shown = shown.replace('"', "'").replace("|", "/")
+        shown = _mermaid_text(" / ".join(unique[:3])) + ("…" if len(unique) > 3 else "")
         lines.append(f'    {ids[source]} -->|"{shown}"| {ids[target]}')
 
     entry_node = ids.get(graph.entry)
@@ -174,14 +233,15 @@ def mermaid(graph: AppGraph, *, include_self_loops: bool = False) -> str:
 
 
 def html(graph: AppGraph, *, title: str = "Application graph") -> str:
-    """A standalone page: the diagram, plus the tables behind it.
+    """A standalone page: the drawn graph, plus the tables behind it.
 
-    Self-contained by design — the mermaid runtime is the only thing it needs
-    and Artifacts provide it, so the file works offline and can be committed
-    next to a run record.
+    The diagram is real SVG with a layout solved in `discovery.svg`, not
+    mermaid source awaiting a renderer. That keeps the page working as a
+    local `file://` with no library and no network, which is what it needs to
+    be when it is sitting in `runs/` next to the crawl that produced it.
     """
     esc = html_escape.escape
-    diagram = mermaid(graph)
+    diagram = render_svg(graph)
 
     rows = []
     for state_id, state in sorted(graph.states.items(), key=lambda kv: kv[1].url_template):
@@ -218,15 +278,27 @@ def html(graph: AppGraph, *, title: str = "Application graph") -> str:
     return f"""<title>{esc(title)}</title>
 <style>
   :root {{ --bg:#fff; --fg:#1a1a1a; --mut:#666; --line:#e4e4e7; --card:#fafafa;
-           --ok:#2d6a4f; --warn:#b45309; }}
+           --ok:#2d6a4f; --warn:#b45309; --accent:#2563eb;
+           --edge:#b4b4bb; --nodebg:#fff; --nodeline:#d4d4d8;
+           --entrybg:#e7f5ec; --entryline:#2d6a4f;
+           --termbg:#fdf0f5; --termline:#a34a72; }}
   @media (prefers-color-scheme: dark) {{
     :root {{ --bg:#111214; --fg:#e8e8ea; --mut:#9a9aa2; --line:#2a2b30; --card:#17181c;
-             --ok:#95d5b2; --warn:#fbbf24; }}
+             --ok:#95d5b2; --warn:#fbbf24; --accent:#7aa2f7;
+             --edge:#4a4b54; --nodebg:#1d1e24; --nodeline:#3a3b44;
+             --entrybg:#16342a; --entryline:#95d5b2;
+             --termbg:#331d2a; --termline:#d595b2; }}
   }}
   :root[data-theme="dark"] {{ --bg:#111214; --fg:#e8e8ea; --mut:#9a9aa2; --line:#2a2b30;
-                              --card:#17181c; --ok:#95d5b2; --warn:#fbbf24; }}
+                              --card:#17181c; --ok:#95d5b2; --warn:#fbbf24;
+                              --accent:#7aa2f7; --edge:#4a4b54; --nodebg:#1d1e24;
+                              --nodeline:#3a3b44; --entrybg:#16342a; --entryline:#95d5b2;
+                              --termbg:#331d2a; --termline:#d595b2; }}
   :root[data-theme="light"] {{ --bg:#fff; --fg:#1a1a1a; --mut:#666; --line:#e4e4e7;
-                               --card:#fafafa; --ok:#2d6a4f; --warn:#b45309; }}
+                               --card:#fafafa; --ok:#2d6a4f; --warn:#b45309;
+                               --accent:#2563eb; --edge:#b4b4bb; --nodebg:#fff;
+                               --nodeline:#d4d4d8; --entrybg:#e7f5ec; --entryline:#2d6a4f;
+                               --termbg:#fdf0f5; --termline:#a34a72; }}
   body {{ background:var(--bg); color:var(--fg); margin:0; padding:2rem 1.5rem;
           font:15px/1.55 ui-sans-serif,system-ui,-apple-system,sans-serif; }}
   main {{ max-width:1100px; margin:0 auto; }}
@@ -250,6 +322,9 @@ def html(graph: AppGraph, *, title: str = "Application graph") -> str:
   .ok {{ color:var(--ok); font-weight:600; }}
   .warn {{ color:var(--warn); font-weight:600; }}
   .scroll {{ overflow-x:auto; }}
+  .key {{ display:inline-flex; align-items:center; gap:.35rem; margin-right:.9rem; }}
+  .swatch {{ width:13px; height:13px; border-radius:3px; display:inline-block; }}
+{GRAPH_STYLE}
 </style>
 <main>
   <h1>{esc(title)}</h1>
@@ -265,7 +340,20 @@ def html(graph: AppGraph, *, title: str = "Application graph") -> str:
   <p>Graph is {status}</p>
 
   <h2>Structure</h2>
-  <div class="diagram"><pre class="mermaid">{esc(diagram)}</pre></div>
+  <div id="graphbar">
+    <button id="fit">Fit</button>
+    <button id="zoomin">+</button>
+    <button id="zoomout">&minus;</button>
+    <span class="key"><span class="swatch" style="background:var(--entrybg);
+      border:2px solid var(--entryline)"></span>entry</span>
+    <span class="key"><span class="swatch" style="background:var(--termbg);
+      border:1px solid var(--termline)"></span>terminal</span>
+    <span>drag to pan &middot; scroll to zoom &middot; hover a state to isolate it</span>
+  </div>
+  <div id="graphwrap" style="height:min(70vh,640px)">{diagram}</div>
+  <p class="sub" style="margin-top:.6rem">Site-wide navigation is omitted —
+  every state links to every other, and drawing that hides the flows.
+  Dashed edges go backward or sideways.</p>
 
   <h2>States</h2>
   <div class="scroll"><table>
@@ -279,6 +367,7 @@ def html(graph: AppGraph, *, title: str = "Application graph") -> str:
     {''.join(edges)}
   </table></div>
 </main>
+<script>{GRAPH_SCRIPT}</script>
 """
 
 

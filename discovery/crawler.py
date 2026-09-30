@@ -120,6 +120,11 @@ class CrawlConfig:
     # and destroys the comparison the two builds exist to support. They are
     # two crawls whose graphs get diffed, not one crawl.
     exclude_prefixes: tuple[str, ...] = ()
+    # The inverse, and the one you want when the region under test is a
+    # subtree rather than the whole site: everything outside this prefix is
+    # out of region. Exclusion cannot express "stay under /broken", because
+    # every route on the site starts with the sound build's "/".
+    stay_under: str = ""
     # How many distinct states an affordance must behave identically in
     # before it is treated as site-wide navigation and stops being fired.
     # Two is too eager (a coincidence), and much above three wastes most of
@@ -246,8 +251,8 @@ class Crawler:
         # cannot. If firing one left the region under test, record where it
         # went but do not explore onward from there.
         if self._is_excluded(after_snapshot.get("url")):
-            self._say(f"  {affordance.label!r} -> excluded region, not followed")
-            self._mark_unexplored(state.id, affordance.key)
+            self._say(f"  {affordance.label!r} -> outside region, not followed")
+            self._mark_out_of_region(state.id, affordance.key)
             return
 
         target = self.graph.observe(after_snapshot)
@@ -309,6 +314,7 @@ class Crawler:
             if affordance.kind == "link" and not self._is_same_origin(affordance.href):
                 continue
             if self._is_excluded(affordance.href):
+                self._mark_out_of_region(state.id, key)
                 continue
             pair = (state.id, key)
             if pair in self._queued:
@@ -490,13 +496,19 @@ class Crawler:
 
     def _is_excluded(self, url: str | None) -> bool:
         """Whether a destination is outside the region being crawled."""
-        if not url or not self.config.exclude_prefixes:
+        if not url:
             return False
         path = url[len(self.base_url):] if url.startswith(self.base_url) else url
         if not path.startswith("/"):
             path = "/" + path
+        bare = path.split("?")[0].split("#")[0]
+
+        under = self.config.stay_under.rstrip("/")
+        if under and not (bare == under or bare.startswith(under + "/")):
+            return True
+
         return any(
-            path == prefix or path.startswith(prefix.rstrip("/") + "/")
+            bare == prefix.rstrip("/") or bare.startswith(prefix.rstrip("/") + "/")
             for prefix in self.config.exclude_prefixes
         )
 
@@ -504,6 +516,11 @@ class Crawler:
         self.graph.unexplored.setdefault(state_id, [])
         if key not in self.graph.unexplored[state_id]:
             self.graph.unexplored[state_id].append(key)
+
+    def _mark_out_of_region(self, state_id: str, key: str) -> None:
+        self.graph.out_of_region.setdefault(state_id, [])
+        if key not in self.graph.out_of_region[state_id]:
+            self.graph.out_of_region[state_id].append(key)
 
     @staticmethod
     def _effects(before, after) -> tuple[str, ...]:
@@ -572,22 +589,69 @@ if __name__ == "__main__":
                         metavar="PREFIX",
                         help="route prefix the crawl must not enter "
                              "(repeatable, e.g. --exclude /broken)")
+    parser.add_argument("--stay-under", default="", metavar="PREFIX",
+                        help="confine the crawl to this route subtree "
+                             "(e.g. --stay-under /broken)")
+    parser.add_argument("--repeat", type=int, default=1, metavar="N",
+                        help="crawl N times and diff the graphs; any "
+                             "difference is crawler instability, not a "
+                             "change in the application")
+    parser.add_argument("--slow", action="store_true",
+                        help="wait for network idle after each transition "
+                             "(~30x slower; needed for client-rendered apps)")
     args = parser.parse_args()
 
-    started = time.time()
-    graph = crawl_app(
-        args.base_url,
-        args.entry,
-        headless=not args.headed,
-        config=CrawlConfig(
-            max_states=args.max_states,
-            max_actions=args.max_actions,
-            deny_destructive=args.safe,
-            exclude_prefixes=tuple(args.exclude),
-            credentials={"username": "demo", "password": "demo123"},
-            on_event=lambda m: print(m, flush=True),
-        ),
-    )
-    path = graph.save(args.out)
-    print(f"\n{len(graph.states)} states, {len(graph.actions)} actions "
-          f"in {time.time() - started:.1f}s -> {path}")
+    def run_once() -> tuple[AppGraph, float]:
+        started = time.time()
+        graph = crawl_app(
+            args.base_url,
+            args.entry,
+            headless=not args.headed,
+            config=CrawlConfig(
+                max_states=args.max_states,
+                max_actions=args.max_actions,
+                deny_destructive=args.safe,
+                exclude_prefixes=tuple(args.exclude),
+                stay_under=args.stay_under,
+                wait_until="networkidle" if args.slow else "domcontentloaded",
+                credentials={"username": "demo", "password": "demo123"},
+                on_event=(lambda m: print(m, flush=True)) if args.repeat == 1 else None,
+            ),
+        )
+        return graph, time.time() - started
+
+    graphs = []
+    for attempt in range(max(1, args.repeat)):
+        if args.repeat > 1:
+            print(f"crawl {attempt + 1} of {args.repeat} ...", flush=True)
+        graph, elapsed = run_once()
+        graphs.append(graph)
+        print(f"  {len(graph.states)} states, {len(graph.actions)} actions, "
+              f"{'closed' if graph.is_closed() else 'OPEN'}, {elapsed:.1f}s",
+              flush=True)
+
+    path = graphs[0].save(args.out)
+    print(f"\nwrote {path}")
+
+    # Whole-graph reproducibility is per-state stability to the Nth power, so
+    # instability that looks negligible on one page is fatal across an
+    # application. A crawl that cannot reproduce itself cannot be used to
+    # detect regressions, because every diff is indistinguishable from noise.
+    if len(graphs) > 1:
+        from discovery.graph import graph_diff
+
+        print("\n--- stability ---")
+        unstable = False
+        for i in range(1, len(graphs)):
+            report = graph_diff(graphs[0], graphs[i])
+            if report["identical"]:
+                print(f"crawl 1 vs {i + 1}: identical")
+                continue
+            unstable = True
+            print(f"crawl 1 vs {i + 1}: DIFFERS")
+            for field_name in ("states_added", "states_removed",
+                               "edges_added", "edges_removed"):
+                for entry in report[field_name]:
+                    print(f"  {field_name[:-1].replace('_', ' '):14} {entry}")
+        if unstable:
+            raise SystemExit(1)
