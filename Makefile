@@ -5,7 +5,8 @@ BASE := http://127.0.0.1:$(PORT)
 
 .DEFAULT_GOAL := help
 .PHONY: help install demo broken profile project edit all scan run pages watch dash rules inspect truth clean \
-        crawl crawl-broken crawl-stable map mermaid draw graph graph-diff
+        crawl crawl-broken crawl-stable map mermaid draw graph graph-diff \
+        baseline baseline-cached regression regression-clean flow-rules values
 
 GRAPHS := runs/graphs
 
@@ -130,6 +131,48 @@ graph: crawl draw  ## Map the app, draw it, and open the diagram
 
 graph-diff:  ## Compare the sound and broken graphs (needs both crawls)
 	@$(PY) -m discovery.compare $(GRAPHS)/graph_sound.json $(GRAPHS)/graph_broken.json
+
+# --------------------------------------------------------------------------
+# Baseline and regression — test the whole application, then test the diff
+#
+# The two builds are the two "versions": the sound build is the baseline, and
+# the broken build stands in for a release that changed behaviour. Recording
+# one and replaying it against the other is the same operation you would run
+# against yesterday's deploy and today's.
+# --------------------------------------------------------------------------
+
+BASELINE := runs/baseline-sound
+
+baseline:  ## Record a baseline of the sound build (crawl + flows, uses the LLM)
+	$(call with_app, $(PY) -u main.py --baseline --exclude /broken \
+	  --baseline-dir $(BASELINE) \
+	  --save-flow-candidates runs/flow-candidates.json $(BASE) $(ARGS))
+
+baseline-cached:  ## Re-record the baseline reusing saved flow candidates (no LLM)
+	@test -f runs/flow-candidates.json \
+	  || { echo "no cached candidates — run 'make baseline' first"; exit 2; }
+	$(call with_app, $(PY) -u main.py --baseline --exclude /broken \
+	  --baseline-dir $(BASELINE) \
+	  --flow-candidates runs/flow-candidates.json $(BASE) $(ARGS))
+
+regression:  ## Replay the baseline against the broken build — expect regressions
+	@test -d $(BASELINE) \
+	  || { echo "no baseline yet — run 'make baseline' first"; exit 2; }
+	$(call with_app, $(PY) -u main.py --regression \
+	  --baseline-dir $(BASELINE) $(BASE)/broken $(ARGS))
+
+regression-clean:  ## Replay the baseline against the sound build — expect nothing
+	@test -d $(BASELINE) \
+	  || { echo "no baseline yet — run 'make baseline' first"; exit 2; }
+	$(call with_app, $(PY) -u main.py --regression \
+	  --baseline-dir $(BASELINE) --exclude /broken $(BASE) $(ARGS))
+
+flow-rules:  ## Show the flow invariants the rule base holds
+	@$(PY) -m knowledge.flows
+
+values:  ## Print the readable value surface of one page (URL=...)
+	@test -n "$(URL)" || { echo "usage: make values URL=/catalog"; exit 2; }
+	$(call with_app, $(PY) -m discovery.readable "$(BASE)$(URL)" --text)
 
 clean:  ## Remove caches and run records
 	rm -rf runs __pycache__ */__pycache__

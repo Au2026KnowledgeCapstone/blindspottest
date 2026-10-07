@@ -364,24 +364,34 @@ class AppGraph:
         return not any(self.unexplored.values())
 
     def path_to(self, target: str) -> list[Action] | None:
-        """Shortest action sequence from the entry to `target`, if one exists.
+        """Shortest action sequence from the entry to `target`, if one exists."""
+        return self.path_between(self.entry, target)
+
+    def path_between(self, source: str, target: str) -> list[Action] | None:
+        """Shortest action sequence from `source` to `target`, if one exists.
 
         Breadth-first and deterministic: no model is involved in pathfinding,
         so a plan is correct by construction against the graph rather than
         plausible-looking. This is the primitive a capability check is built
         on, and the reason edges need to record their inputs.
+
+        Walked edges are explored before inferred ones. Both are the same
+        length to BFS, so this only decides which of several equally short
+        paths is returned — and a path made of edges somebody actually fired
+        is a better bet for replay than one assembled out of deductions about
+        site-wide navigation.
         """
-        if target == self.entry:
+        if source == target:
             return []
-        if target not in self.states:
+        if source not in self.states or target not in self.states:
             return None
 
-        queue: list[tuple[str, list[Action]]] = [(self.entry, [])]
-        seen = {self.entry}
+        queue: list[tuple[str, list[Action]]] = [(source, [])]
+        seen = {source}
 
         while queue:
             current, walk = queue.pop(0)
-            for action in self.out_edges(current):
+            for action in sorted(self.out_edges(current), key=lambda a: a.inferred):
                 if action.target in seen:
                     continue
                 extended = walk + [action]

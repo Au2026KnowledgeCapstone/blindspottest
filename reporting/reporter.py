@@ -174,6 +174,119 @@ class ConsoleReporter:
             self._p(f"  Results: {path}")
         self._p()
 
+    # -- flow-level output -------------------------------------------------
+    #
+    # Kept on the same reporter rather than split onto a second one, because
+    # a run produces both kinds of test and interleaving two output styles
+    # reads as two programs reporting on one application.
+
+    def crawling(self, base_url: str) -> None:
+        self._p(f"Mapping the application... {self.s.dim(base_url)}")
+
+    def crawled(self, graph) -> None:
+        closed = graph.is_closed()
+        self._p(
+            f"  {len(graph.states)} states, {len(graph.actions)} actions, "
+            + (self.s.green("closed") if closed else self.s.amber("OPEN"))
+        )
+        if not closed:
+            pending = sum(len(v) for v in graph.unexplored.values())
+            self._p(self.s.dim(
+                f"  {pending} affordance(s) unexplored — absence of a route "
+                f"proves nothing from this crawl."
+            ))
+        self._p()
+
+    def reading_values(self, count: int) -> None:
+        self._p(f"Reading the value surface of {count} state(s)...")
+        self._p()
+
+    def flow_classified(self, result) -> None:
+        n = len(result.candidates)
+        self._p(f"  {n} capability candidate{'' if n == 1 else 's'} identified.")
+        for candidate in result.candidates:
+            self._p(self.s.dim(
+                f"    {candidate.capability.value} -> {candidate.goal_state_id}"
+            ))
+        for rejected in result.rejected:
+            self._p(self.s.dim(f"  discarded: {rejected.reason}"))
+        self._p()
+
+    def flow_candidate(self, index: int, instance, candidate) -> None:
+        self._p(self.s.bold(f"Flow #{index}"))
+        self._p(f"  Capability: {instance.capability}")
+        self._p(f"  Walk:       {' -> '.join(s.label for s in instance.goal) or '(none)'}")
+        if instance.probe_mode:
+            target = instance.probe_path or f"({instance.probe_mode})"
+            self._p(f"  Probe:      {target}")
+        self._p(
+            f"  Applicability confidence: "
+            f"{candidate.applicability_confidence:.2f}"
+        )
+        self._p()
+        self._p("Applying rule:")
+        self._p(f"  {instance.invariant}")
+        self._p()
+
+    def flow_skipped(self, skip) -> None:
+        self._p(self.s.dim(
+            f"  skipped {skip.invariant_id} for "
+            f"{skip.candidate.capability.value}: {', '.join(skip.unmet)}"
+        ))
+
+    def flow_testing(self, result) -> None:
+        obs = result.observations
+        self._p("Walking the flow...")
+        for state in result.states:
+            arrived = state["state_id"] == state["expected_state_id"]
+            mark = "ok" if arrived else "NOT the expected state"
+            self._p(f"  {state['phase']:5} -> {state['url_template']} ({mark})")
+        if obs.get("goal_reached") is False:
+            self._p(self.s.amber("  the flow did not complete"))
+        for name, value in obs.items():
+            if name in ("setup_reached", "goal_reached", "captured_url"):
+                continue
+            self._p(f"  {name}: {value!r}")
+        self._p()
+
+    def flow_verdict(self, verdict, result) -> None:
+        if verdict.status is Status.HOLDS:
+            self._p(self.s.green("PASS"))
+            self._p(f"  {verdict.detail}")
+        elif verdict.status is Status.VIOLATED:
+            self._p(self.s.red("POTENTIAL REGRESSION DETECTED"))
+            self._p(f"  Invariant: {verdict.invariant_id}")
+            self._p(f"  {verdict.detail}")
+            self._p()
+            self._p("  Evidence:")
+            self._p(f"    {verdict.summary or verdict.detail}")
+            self._p()
+            self._p(self.s.amber("  Human review recommended."))
+        else:
+            self._p(self.s.blue("INCONCLUSIVE"))
+            self._p(f"  {verdict.detail}")
+            if result.error:
+                self._p(self.s.dim(f"  {result.error}"))
+
+        if result.reset is False:
+            self._p()
+            self._p(self.s.amber(
+                "  WARNING: could not reset the session; the flow's "
+                "mutations may remain."
+            ))
+        self._p()
+
+    def baselined(self, directory, description: str) -> None:
+        self._p(self.s.bold("Baseline recorded"))
+        self._p(f"  {description}")
+        self._p(f"  {directory}")
+        self._p()
+        self._p(self.s.dim(
+            "  Re-run against a later build with:\n"
+            f"    python main.py --regression --baseline-dir {directory} <url>"
+        ))
+        self._p()
+
 
 # --------------------------------------------------------------------------
 # Machine-readable record
@@ -266,6 +379,108 @@ def build_entry(instance, candidate, result, verdict) -> dict:
         # here is what it said". Teardown steps are flagged so a failed
         # restore is distinguishable from a failed test.
         "steps": [step.to_dict() for step in result.steps],
+    }
+
+
+def build_flow_entry(instance, candidate, result, verdict) -> dict:
+    """One flow test's record.
+
+    The walk is recorded as labels rather than locators, and the states as
+    the fingerprints actually reached beside the ones expected. Together
+    those turn "inconclusive" into "the goal walk ended on /projects/<id>
+    when it should have ended on /projects", which is the difference between
+    a result someone can act on and one they have to reproduce by hand.
+    """
+    status_word = {
+        Status.HOLDS: "holds",
+        Status.VIOLATED: "violation",
+        Status.INCONCLUSIVE: "inconclusive",
+    }[verdict.status]
+
+    return {
+        "test_id": instance.test_id,
+        "kind": "flow",
+        "invariant": instance.invariant,
+        "capability": instance.capability,
+        "setup_walk": [s.label for s in instance.setup],
+        "goal_walk": [s.label for s in instance.goal],
+        "bindings": [b.to_dict() for b in instance.bindings],
+        "probe": (
+            {"mode": instance.probe_mode, "path": instance.probe_path}
+            if instance.probe_mode
+            else None
+        ),
+        "applicability_confidence": candidate.applicability_confidence
+        if candidate
+        else None,
+        "applicability_reasoning": candidate.reasoning_summary if candidate else None,
+        "expected_relation": instance.expected_relation,
+        "precondition": instance.precondition,
+        "observations": result.observations,
+        "states": result.states,
+        "result": status_word,
+        "detail": verdict.detail,
+        "severity": verdict.severity,
+        "reset": result.reset,
+        "error": result.error,
+        "duration_ms": result.duration_ms,
+        "steps": [step.to_dict() for step in result.steps],
+    }
+
+
+def build_mixed_record(
+    url: str,
+    model: str,
+    entries: list[dict],
+    skipped: list | None = None,
+    rejected: list | None = None,
+    *,
+    graph_summary: dict | None = None,
+) -> dict:
+    """A run record covering page-level and flow-level tests together.
+
+    `build_record` assumes every entry is a page-level persistence test and
+    describes its skips in those terms. This is the app-level equivalent, for
+    runs that produce both kinds — kept separate so existing records and the
+    dashboard that reads them stay exactly as they were.
+    """
+    return {
+        "blindspot_version": "0.2",
+        "url": url,
+        "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "model": model,
+        "graph": graph_summary or {},
+        "tests": entries,
+        "skipped": [
+            {
+                "invariant": s.invariant_id,
+                "subject": getattr(
+                    getattr(s.candidate, "capability", None), "value", None
+                )
+                or getattr(s.candidate, "field_id", "?"),
+                "unmet_requirements": list(s.unmet),
+            }
+            for s in (skipped or [])
+        ],
+        "rejected_candidates": [
+            {
+                "reason": r.reason,
+                "subject": getattr(
+                    getattr(r.candidate, "capability", None), "value", None
+                )
+                or getattr(r.candidate, "field_id", "?"),
+            }
+            for r in (rejected or [])
+        ],
+        "summary": {
+            "passed": sum(1 for e in entries if e["result"] == "holds"),
+            "violations": sum(1 for e in entries if e["result"] == "violation"),
+            "inconclusive": sum(1 for e in entries if e["result"] == "inconclusive"),
+            "page_tests": sum(1 for e in entries if e.get("kind") != "flow"),
+            "flow_tests": sum(1 for e in entries if e.get("kind") == "flow"),
+            "skipped": len(skipped or []),
+            "rejected": len(rejected or []),
+        },
     }
 
 

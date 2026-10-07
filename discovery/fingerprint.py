@@ -64,7 +64,9 @@ TRANSIENT_QUERY_KEYS = frozenset({
 })
 
 
-def url_template(url: str, *, keep_query_keys: bool = True) -> str:
+def url_template(
+    url: str, *, keep_query_keys: bool = True, strip_prefix: str = ""
+) -> str:
     """Normalize a URL to the route it represents.
 
     Query *keys* are kept and query *values* dropped, which is the right call
@@ -72,11 +74,24 @@ def url_template(url: str, *, keep_query_keys: bool = True) -> str:
     state — a filtered catalog — reached with different arguments. Keeping the
     values would mint a new state per filter combination and explode the graph
     on exactly the pages most worth testing.
+
+    `strip_prefix` removes a mount point from the path before templating, so
+    the same application served at two different paths produces the same
+    state identities. Without it a baseline recorded against `/cart` can
+    never be replayed against `/broken/cart` or `/v2/cart`: the fingerprint
+    would differ on the prefix alone, every arrival check would fail, and
+    every test would come back inconclusive — which looks like a catastrophic
+    regression and is really just a changed mount point.
     """
     parts = urlsplit(url)
 
+    path = parts.path
+    prefix = (strip_prefix or "").rstrip("/")
+    if prefix and (path == prefix or path.startswith(prefix + "/")):
+        path = path[len(prefix):] or "/"
+
     segments = []
-    for segment in parts.path.split("/"):
+    for segment in path.split("/"):
         if not segment:
             continue
         if (
@@ -198,9 +213,20 @@ class Fingerprint:
         return "\n".join(lines)
 
 
-def fingerprint(snapshot: dict, *, keep_query_keys: bool = True) -> Fingerprint:
-    """Reduce a `page_inspector` snapshot to a stable state identity."""
-    template = url_template(snapshot.get("url", ""), keep_query_keys=keep_query_keys)
+def fingerprint(
+    snapshot: dict, *, keep_query_keys: bool = True, strip_prefix: str = ""
+) -> Fingerprint:
+    """Reduce a `page_inspector` snapshot to a stable state identity.
+
+    `strip_prefix` is passed through to `url_template`, which is what lets a
+    recorded state be recognised in a deployment of the same application
+    mounted at a different path.
+    """
+    template = url_template(
+        snapshot.get("url", ""),
+        keep_query_keys=keep_query_keys,
+        strip_prefix=strip_prefix,
+    )
 
     counts: dict[str, int] = {}
     for element in snapshot.get("elements", []):

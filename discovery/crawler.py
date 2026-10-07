@@ -131,6 +131,18 @@ class CrawlConfig:
     # the saving on a large app.
     global_after: int = 3
     on_event: Callable[[str], None] | None = None
+    # Called with (page, state) the first time each state is reached, while
+    # the browser is still on it.
+    #
+    # This exists because some states are only ever arrived at by POST. A
+    # checkout confirmation has an `example_url`, but re-requesting it with a
+    # GET does not render the confirmation — so anything a later stage needs
+    # to read off that page has to be captured now, during the one visit
+    # there will be. The flow layer's value bindings are exactly that.
+    #
+    # Deliberately a callback rather than a flag: the crawl stays a crawl and
+    # has no opinion about what anyone wants from a page.
+    on_state: Callable[[object, object], None] | None = None
 
 
 # --------------------------------------------------------------------------
@@ -169,6 +181,20 @@ class Crawler:
         if self.config.on_event:
             self.config.on_event(message)
 
+    def _note_state(self, state: State) -> None:
+        """Offer a newly discovered state to the observer, if there is one.
+
+        Only on the first visit, and never allowed to fail the crawl: an
+        observer is a bystander, and a map is still worth having when
+        something optional raised on one page.
+        """
+        if self.config.on_state is None or state.visits != 1:
+            return
+        try:
+            self.config.on_state(self.page, state)
+        except Exception as exc:
+            self._say(f"  [observer] {state.id}: {type(exc).__name__}: {exc}")
+
     # -- entry point -------------------------------------------------------
 
     def crawl(self, entry_path: str = "/") -> AppGraph:
@@ -177,6 +203,7 @@ class Crawler:
         self._reset()
         self._goto(entry_url)
         entry_state = self._observe()
+        self._note_state(entry_state)
         self.graph.entry = entry_state.id
         self._say(f"entry {entry_state.id} {entry_state.url_template}")
         self._enqueue(entry_state, depth=0)
@@ -256,6 +283,7 @@ class Crawler:
             return
 
         target = self.graph.observe(after_snapshot)
+        self._note_state(target)
         after = fingerprint(after_snapshot)
 
         effects = self._effects(before, after)
