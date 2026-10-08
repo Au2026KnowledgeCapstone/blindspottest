@@ -181,6 +181,13 @@ def parse_args(argv=None):
 
     run = p.add_argument_group("run")
     run.add_argument("--headed", action="store_true", help="show the browser")
+    run.add_argument("--slow-mo", type=int, default=0, metavar="MS",
+                     help="pause this many ms before each browser action. "
+                          "Pair with --headed to actually watch a crawl or a "
+                          "flow walk; 300-500 is readable")
+    run.add_argument("-v", "--verbose", action="store_true",
+                     help="print the crawler's running trace of what it "
+                          "clicks and where it lands")
     run.add_argument("--seed", type=int,
                      help="fix mutation values for reproducibility")
     run.add_argument("--runs-dir", type=Path, default=Path("runs"))
@@ -197,6 +204,22 @@ def parse_args(argv=None):
 # --------------------------------------------------------------------------
 # Shared stages
 # --------------------------------------------------------------------------
+
+
+def _launch(playwright, args):
+    """Open a browser, honouring `--headed` and `--slow-mo`.
+
+    `slow_mo` is what makes a headed run worth watching. Playwright drives a
+    page far faster than anyone can follow, so `--headed` on its own gives
+    you a visible browser flickering through a hundred actions — technically
+    what was asked for and useless in practice. The pause is applied by
+    Playwright before each action, so it slows the run down without changing
+    what the run does.
+    """
+    return playwright.chromium.launch(
+        headless=not args.headed,
+        slow_mo=args.slow_mo,
+    )
 
 
 def _crawl(page, base_url: str, args, console) -> tuple[AppGraph, dict[str, dict]]:
@@ -226,6 +249,12 @@ def _crawl(page, base_url: str, args, console) -> tuple[AppGraph, dict[str, dict
             timeout_ms=args.timeout,
             credentials={"username": "demo", "password": "demo123"},
             on_state=observe,
+            # The crawler narrates every affordance it fires and where it
+            # landed. `discovery.crawler`'s own CLI prints that by default,
+            # but a baseline run went silent for the whole crawl — which on
+            # a large application is indistinguishable from a hang. Under
+            # `-v` the same trace is available here.
+            on_event=console.crawl_event if args.verbose else None,
         ),
     )
     graph = crawler.crawl(args.entry)
@@ -415,7 +444,7 @@ def run_baseline(args) -> int:
     model_name = "(none)"
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=not args.headed)
+        browser = _launch(p, args)
         try:
             page = browser.new_page()
             graph, readables = _crawl(page, base_url, args, console)
@@ -491,7 +520,7 @@ def run_regression(args) -> int:
     fresh_records: list = []
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=not args.headed)
+        browser = _launch(p, args)
         try:
             page = browser.new_page()
 
@@ -594,7 +623,7 @@ def run_adhoc(args) -> int:
     engine = KnowledgeEngine.load()
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=not args.headed)
+        browser = _launch(p, args)
         try:
             page = browser.new_page()
             page.goto(args.url, timeout=args.timeout, wait_until="domcontentloaded")

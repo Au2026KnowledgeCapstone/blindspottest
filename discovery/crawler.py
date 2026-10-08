@@ -583,13 +583,20 @@ def crawl_app(
     entry_path: str = "/",
     *,
     headless: bool = True,
+    slow_mo: int = 0,
     config: CrawlConfig | None = None,
 ) -> AppGraph:
-    """Open a browser, crawl, and return the graph."""
+    """Open a browser, crawl, and return the graph.
+
+    `slow_mo` pauses before each browser action. It exists for watching a
+    crawl with `headless=False`: Playwright fires actions faster than anyone
+    can follow, so a visible browser without it shows a blur rather than a
+    walk. It changes the pace of a crawl, never its result.
+    """
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
+        browser = p.chromium.launch(headless=headless, slow_mo=slow_mo)
         try:
             page = browser.new_page()
             return Crawler(page, base_url, config).crawl(entry_path)
@@ -611,6 +618,10 @@ if __name__ == "__main__":
     parser.add_argument("--max-states", type=int, default=60)
     parser.add_argument("--max-actions", type=int, default=400)
     parser.add_argument("--headed", action="store_true")
+    parser.add_argument("--slow-mo", type=int, default=0, metavar="MS",
+                        help="pause this many ms before each browser action; "
+                             "pair with --headed to watch the crawl "
+                             "(300-500 is readable)")
     parser.add_argument("--safe", action="store_true",
                         help="skip affordances whose text looks destructive")
     parser.add_argument("--exclude", action="append", default=[],
@@ -635,6 +646,7 @@ if __name__ == "__main__":
             args.base_url,
             args.entry,
             headless=not args.headed,
+            slow_mo=args.slow_mo,
             config=CrawlConfig(
                 max_states=args.max_states,
                 max_actions=args.max_actions,

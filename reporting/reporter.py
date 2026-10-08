@@ -183,6 +183,15 @@ class ConsoleReporter:
     def crawling(self, base_url: str) -> None:
         self._p(f"Mapping the application... {self.s.dim(base_url)}")
 
+    def crawl_event(self, message: str) -> None:
+        """One line of the crawler's running narration.
+
+        Dimmed because it is a progress trace rather than a result — it
+        should be skimmable and ignorable, not competing with the verdicts
+        underneath it. Passed straight to `CrawlConfig.on_event`.
+        """
+        self._p(self.s.dim(f"  {message}"))
+
     def crawled(self, graph) -> None:
         closed = graph.is_closed()
         self._p(
