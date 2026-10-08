@@ -356,25 +356,30 @@ and a changed path would read as a total regression.
 Discovery on its own:
 
 ```bash
-make crawl               # map the sound build -> runs/graphs/graph_sound.json
-make crawl-broken        # map the broken build -> runs/graphs/graph_broken.json
-make crawl-stable        # crawl twice and diff — proves fingerprint stability
-make map                 # print the summary() an LLM would be shown
-make mermaid             # print mermaid source
-make draw / make graph   # render + open the HTML diagram
-make graph-diff          # structural diff of the sound vs. broken graphs
-make values URL=/catalog # print one page's readable value surface
+make crawl                 # map the sound build -> runs/graphs/graph_sound.json
+make crawl-broken          # map the broken build -> runs/graphs/graph_broken.json
+make crawl-stable          # crawl twice and diff — proves fingerprint stability
+make view                  # print the summary() an LLM would be shown
+make view VIEW=mermaid     # or mermaid / json — same flag projections.py takes
+make draw                  # render the crawled graph as HTML and open it
+make graph                 # crawl + draw in one shot
+make graph-diff            # structural diff of the sound vs. broken graphs
+make values URL=/catalog   # one page's readable value surface
+make inspect URL=/catalog  # one page's control snapshot
 ```
 
 Discovery as part of a whole run:
 
 ```bash
-make baseline            # crawl + classify + run flows, record to runs/baseline-sound
-make baseline-cached     # same, reusing saved flow candidates (no LLM)
-make regression          # replay that baseline against /broken — expect regressions
-make regression-clean    # replay it against the sound build — expect nothing
-make flow-rules          # show the flow invariants the rule base holds
+make baseline              # crawl + classify + run flows -> runs/baseline-sound
+make baseline-cached       # same, reusing saved flow candidates (no LLM)
+make regression            # replay that baseline against /broken — expect regressions
+make regression-clean      # replay it against the sound build — expect nothing
+make rules                 # print both rule bases, page-level and flow-level
 ```
+
+`URL=` accepts a path relative to the demo app or a full URL; `ARGS=` is
+passed through to the underlying command.
 
 ## Known gaps
 

@@ -376,7 +376,7 @@ def render(runs: list[dict]) -> str:
     else:
         body = (
             '<div class="empty"><p>No runs recorded yet.</p>'
-            "<code>make broken</code></div>"
+            "<code>make demo</code></div>"
         )
 
     latest = _when(runs[0].get("started_at")) if runs else "—"

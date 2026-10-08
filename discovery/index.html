@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Discovery — Application State Mapping</title>
+<style>
+:root {
+  --bg-primary: #f8f7f5;
+  --bg-secondary: #f0eeeb;
+  --bg-code: #e8e6e3;
+  --text-primary: #2b2b2b;
+  --text-secondary: #5a5a5a;
+  --accent: #0d7377;
+  --accent-light: #14919b;
+  --border: #d4d2cf;
+  --border-light: #e8e6e3;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-primary: #1a1a1a;
+    --bg-secondary: #242423;
+    --bg-code: #2d2d2d;
+    --text-primary: #e8e6e3;
+    --text-secondary: #a9a7a3;
+    --accent: #4db8c4;
+    --accent-light: #6cc9d6;
+    --border: #3a3835;
+    --border-light: #2d2d2d;
+  }
+}
+
+:root[data-theme="light"] {
+  --bg-primary: #f8f7f5;
+  --bg-secondary: #f0eeeb;
+  --bg-code: #e8e6e3;
+  --text-primary: #2b2b2b;
+  --text-secondary: #5a5a5a;
+  --accent: #0d7377;
+  --accent-light: #14919b;
+  --border: #d4d2cf;
+  --border-light: #e8e6e3;
+}
+
+:root[data-theme="dark"] {
+  --bg-primary: #1a1a1a;
+  --bg-secondary: #242423;
+  --bg-code: #2d2d2d;
+  --text-primary: #e8e6e3;
+  --text-secondary: #a9a7a3;
+  --accent: #4db8c4;
+  --accent-light: #6cc9d6;
+  --border: #3a3835;
+  --border-light: #2d2d2d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.6;
+  margin: 0;
+  padding: 0;
+}
+
+.container {
+  display: flex;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.sidebar {
+  width: 240px;
+  padding: 2rem 1.5rem;
+  background-color: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+  font-size: 0.9rem;
+}
+
+.sidebar h3 {
+  margin: 0 0 1rem 0;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+  font-family: 'Monaco', 'Courier New', monospace;
+  font-weight: 600;
+}
+
+.toc {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.toc li {
+  margin-bottom: 0.5rem;
+}
+
+.toc a {
+  color: var(--text-secondary);
+  text-decoration: none;
+  display: block;
+  padding: 0.4rem 0.75rem;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+}
+
+.toc a:hover {
+  color: var(--accent);
+  background-color: var(--bg-primary);
+}
+
+.toc a.active {
+  color: var(--accent);
+  font-weight: 600;
+  background-color: var(--bg-primary);
+}
+
+.content {
+  flex: 1;
+  padding: 3rem 4rem;
+  max-width: 900px;
+}
+
+header {
+  margin-bottom: 3rem;
+  padding-bottom: 2rem;
+  border-bottom: 2px solid var(--accent);
+}
+
+h1 {
+  font-family: 'Monaco', 'Courier New', monospace;
+  font-size: 2.5rem;
+  margin: 0 0 0.5rem 0;
+  font-weight: 400;
+  letter-spacing: -0.02em;
+}
+
+header p {
+  font-size: 1.1rem;
+  color: var(--text-secondary);
+  margin: 1rem 0 0 0;
+  line-height: 1.8;
+}
+
+h2 {
+  font-family: 'Monaco', 'Courier New', monospace;
+  font-size: 1.5rem;
+  margin: 2.5rem 0 1rem 0;
+  font-weight: 500;
+  color: var(--text-primary);
+  padding-top: 1rem;
+}
+
+h3 {
+  font-family: 'Monaco', 'Courier New', monospace;
+  font-size: 1.1rem;
+  margin: 1.5rem 0 0.75rem 0;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+h2:first-of-type {
+  margin-top: 2rem;
+}
+
+p {
+  margin: 1rem 0;
+  color: var(--text-primary);
+  font-size: 0.95rem;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+a:hover {
+  color: var(--accent-light);
+}
+
+code {
+  font-family: 'Monaco', 'Courier New', monospace;
+  font-size: 0.85em;
+  background-color: var(--bg-code);
+  padding: 0.2em 0.4em;
+  border-radius: 3px;
+  color: var(--text-primary);
+}
+
+pre {
+  background-color: var(--bg-code);
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  padding: 1rem;
+  overflow-x: auto;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  margin: 1rem 0;
+}
+
+pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.5rem 0;
+  font-size: 0.9rem;
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+thead {
+  background-color: var(--bg-code);
+  border-bottom: 2px solid var(--border);
+}
+
+th {
+  padding: 0.75rem 1rem;
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-family: 'Monaco', 'Courier New', monospace;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+td {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border-light);
+}
+
+tr:last-child td {
+  border-bottom: none;
+}
+
+ul, ol {
+  margin: 1rem 0;
+  padding-left: 2rem;
+}
+
+li {
+  margin: 0.5rem 0;
+}
+
+.section {
+  margin-bottom: 2rem;
+}
+
+.section-intro {
+  background-color: var(--bg-secondary);
+  border-left: 4px solid var(--accent);
+  padding: 1.25rem;
+  border-radius: 4px;
+  margin: 1.5rem 0;
+  font-size: 0.95rem;
+  line-height: 1.7;
+}
+
+.pipeline-diagram {
+  background-color: var(--bg-code);
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  padding: 1.5rem;
+  margin: 1.5rem 0;
+  overflow-x: auto;
+  font-family: 'Monaco', 'Courier New', monospace;
+  font-size: 0.8rem;
+  line-height: 1.6;
+  white-space: pre;
+}
+
+.pipeline-diagram code {
+  background: none;
+  padding: 0;
+}
+
+.concept-table {
+  margin: 1.5rem 0;
+  font-size: 0.9rem;
+}
+
+em {
+  color: var(--text-primary);
+  font-style: italic;
+}
+
+strong {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* Responsive */
+@media (max-width: 1024px) {
+  .container {
+    flex-direction: column;
+  }
+
+  .sidebar {
+    width: 100%;
+    height: auto;
+    position: static;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding: 1.5rem;
+  }
+
+  .content {
+    padding: 2rem 1.5rem;
+  }
+
+  h1 {
+    font-size: 2rem;
+  }
+
+  h2 {
+    font-size: 1.3rem;
+  }
+}
+
+@media (max-width: 640px) {
+  .sidebar h3 {
+    display: none;
+  }
+
+  .toc {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .toc li {
+    margin-bottom: 0;
+  }
+
+  .toc a {
+    padding: 0.4rem 0.6rem;
+    font-size: 0.85rem;
+  }
+
+  .content {
+    padding: 1.5rem;
+  }
+
+  h1 {
+    font-size: 1.5rem;
+  }
+
+  h2 {
+    font-size: 1.1rem;
+  }
+
+  table {
+    font-size: 0.8rem;
+  }
+
+  th, td {
+    padding: 0.5rem;
+  }
+}
+
+.highlight {
+  background-color: var(--accent);
+  color: white;
+  padding: 2px 4px;
+  border-radius: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+</style>
+</head>
+<body>
+
+<div class="container">
+  <aside class="sidebar">
+    <h3>Contents</h3>
+    <ul class="toc">
+      <li><a href="#overview">Overview</a></li>
+      <li><a href="#pipeline">Pipeline</a></li>
+      <li><a href="#modules">Modules</a></li>
+      <li><a href="#concepts">Concepts</a></li>
+      <li><a href="#downstream">Downstream</a></li>
+      <li><a href="#running">Running</a></li>
+      <li><a href="#gaps">Known Gaps</a></li>
+    </ul>
+  </aside>
+
+  <main class="content">
+    <header>
+      <h1>Discovery</h1>
+      <p>Maps what an application exposes — states, the actions that connect them, and what each action changes — without judging whether any of it is correct.</p>
+    </header>
+
+    <section id="overview">
+      <p>Discovery answers "what can this app do"; deciding what it <em>should</em> do is the knowledge engine's job, not this package's.</p>
+
+      <div class="section-intro">
+        <strong>The motivating gap:</strong> the original MVP tested one page at a time (edit field → save → reload → compare). That catches a dropped field, but it structurally cannot see a bug that only shows up across a flow — a soft-deleted resource still being reachable, a line item missing from a checkout total, a sort that breaks on currency strings. Those are properties of a <em>path through the app</em>, so discovery has to build the graph that path lives on before anything can reason about it. See the root <code>README.md</code> for the full motivation and the planted defects in <code>demo_app/</code> that this exists to catch.
+      </div>
+    </section>
+
+    <section id="pipeline">
+      <h2>Pipeline</h2>
+      <p>Two capture modules, because driving an application and checking one need different things off the same page:</p>
+
+      <div class="pipeline-diagram"><code>  a live browser page
+        │
+        ├──> page_inspector.py   DOM -> control snapshot ("what you can DO")
+        │          │
+        │          v
+        │    fingerprint.py      snapshot -> state id ("the same state?")
+        │          │
+        │          v                                       crawler.py
+        │    graph.py            states, edges,        <──  BFS over
+        │          │             pathfinding                (state, affordance),
+        │          │                                        firing everything,
+        │          v                                        + on_state hook ─┐
+        │    projections.py      summary (model-sized),                      │
+        │    svg.py              mermaid / html (human)                      │
+        │          ├──> compare.py   structural diff of two graphs           │
+        │          │                                                         │
+        └──> readable.py         text -> value surface ("what you can READ") ─┘
+                   │
+  ═════════════════╪══════════════ package boundary ══════════════════════
+                   v
+    semantic.flow_classifier   map + value surface -> capabilities    (LLM)
+    knowledge.flows            capability -> which invariants apply
+    runner.flow_runner         walk the path, read the bindings, probe
+    baseline / regression      record it, replay it, diff it</code></div>
+
+      <p><code>readable.py</code> is reached two ways, and both matter. A one-off look can open a page directly, but the crawl's <code>on_state</code> hook is what captures states only reachable by POST — a checkout confirmation cannot be re-requested with a GET, so the single visit the crawl makes is the only chance to read it.</p>
+
+      <p>Nothing below <code>graph.py</code> talks to a browser, and nothing in this package makes a semantic judgment ("this is a checkout flow", "this diff is a regression"). That's deliberate: it's what makes a crawl cacheable to disk, diffable, and re-usable by a layer that <em>does</em> judge, without re-paying the cost of re-crawling.</p>
+
+      <p>The boundary is now load-bearing rather than aspirational — see <a href="#downstream">Downstream</a> for the three things discovery hands off and the guarantees each depends on.</p>
+    </section>
+
+    <section id="modules">
+      <h2>Module by Module</h2>
+
+      <h3><code>page_inspector.py</code> — DOM → snapshot</h3>
+      <p>Runs one JS pass inside the page (not N Playwright round-trips) and returns a compact snapshot: <code>{url, title, elements: [...]}</code>. Each element keeps only what describes <em>what it is and what it currently holds</em> — role, type, label, value, disabled/readonly/required, a resolved locator — and drops everything else, so a 3000-node DOM becomes a dozen entries.</p>
+      <p>Two entry points: <code>inspect_with_page(page)</code> snapshots whatever an already-open page is showing (what the crawler and runner use mid-session), and <code>inspect_page(url)</code> opens a throwaway browser for a one-off look.</p>
+      <p>Every element also carries a <code>locator_strategy</code> (role+name first, falling back to label/placeholder/test-id/CSS) — the same resolution the runner uses to re-find an element later, so a path the crawler walked is guaranteed replayable.</p>
+
+      <h3><code>readable.py</code> — page → value surface</h3>
+      <p>The other half of capture. <code>page_inspector</code> drops everything non-interactive, which is right for driving an application and wrong for checking one: the facts a flow invariant asserts over — a total, a column of prices, a stated row count — are rendered text that never appears in a control snapshot. Without this module a model asked to bind <code>line_totals</code> to a selector would have to invent one.</p>
+      <p><code>readable_with_page(page)</code> returns value-bearing text <em>grouped by selector</em>: one entry per selector, with how many elements it matches, a sample of their text, and whether they parse as numbers. The grouping is the point — a flow invariant reads a collection, so the useful selector is the one matching the collection rather than one of its members, and <code>count</code> is what distinguishes the two.</p>
+
+      <p>Two ranking rules do most of the work:</p>
+      <ul>
+        <li>For a table cell, column position outranks class names. <code>td.num</code> looks specific and is not — a price column and a rating column both carry it, so binding to it conflates two unrelated series into one list.</li>
+        <li>A row-level class enters the cell selector, with a <code>:not()</code> form for the rows that lack it. Without that, <code>table.totals td:nth-child(2)</code> matches the line amounts <em>and</em> the grand total, so <code>sum(line_totals) == order_total</code> would compare a sum against a number inside it and could never fail.</li>
+      </ul>
+
+      <p>Numeric and repeated groups are ranked first, so a model choosing bindings finds totals and row values at the top of the list.</p>
+      <p><code>summarize(readable)</code> renders it one line per selector, which is the form the flow classifier is actually shown.</p>
+      <p>Run it: <code>python -m discovery.readable &lt;url&gt; [--text]</code>, or <code>make values URL=/catalog</code>.</p>
+
+      <h3><code>fingerprint.py</code> — snapshot → state identity</h3>
+      <p>The load-bearing module. Everything above it is only as trustworthy as the answer to "are these two snapshots the same state?" Too strict and <code>/projects/3</code> and <code>/projects/4</code> become different states, blowing up the graph; too loose and pages that behave differently collapse into one node, producing plans that can't be walked.</p>
+      <p>The rule: a state is identified by <strong>what you can do</strong>, not what it currently shows.</p>
+      <ul>
+        <li><strong>kept:</strong> URL template (<code>/projects/&lt;id&gt;</code>, numeric/UUID/hex segments normalized away), control roles/types/names, disabled state</li>
+        <li><strong>dropped:</strong> field values, row counts (bucketed into <code>1</code> / <code>2-3</code> / <code>many</code>), instance text (<code>"Project 37"</code> → <code>"project #"</code>), transient query params (<code>?notice=</code>, <code>?saved=</code>, …)</li>
+      </ul>
+
+      <p><code>strip_prefix</code> removes a mount point before templating. Because the route is part of the identity, a state recorded at <code>/cart</code> would otherwise never be recognised at <code>/broken/cart</code> or <code>/v2/cart</code> — every arrival check would fail and every replayed test would come back inconclusive, which reads as a total regression and is really just a changed mount point. The baseline loader sets it when retargeting a recorded suite at a different deployment.</p>
+
+      <p><code>fingerprint(snapshot)</code> returns a <code>Fingerprint(id, url_template, signature)</code> — <code>id</code> is a sha256 of the sorted, deduplicated signature, so DOM order and instance data never affect identity. <code>diff(left, right)</code> explains what changed between two fingerprints, both for debugging drift and as the raw material for an edge's recorded <code>effects</code>.</p>
+
+      <h3><code>graph.py</code> — the data model</h3>
+      <ul>
+        <li><strong>Affordance</strong> — one actionable element (<code>link</code> / <code>submit</code> / <code>button</code> / <code>field</code>), keyed by its element signature (not its DOM position, which renumbers on every insert).</li>
+        <li><strong>State</strong> — one node: a URL template, a signature, its affordances, and one representative snapshot (kept for the detail projection).</li>
+        <li><strong>Action</strong> — one edge: firing an affordance in <code>source</code> landed in <code>target</code>, with the <code>inputs</code> used, the <code>effects</code> observed, and whether the edge was walked or <code>inferred</code> (see site-wide navigation, below). <code>requires</code>/<code>establishes</code> are where edge preconditions will live so a planner can tell a real path from a merely plausible one.</li>
+        <li><strong>AppGraph</strong> — states + actions for one build. <code>observe(snapshot)</code> records a visit (idempotent — revisits bump a counter, not the stored snapshot); <code>connect(action)</code> adds an edge, de-duping exact repeats; <code>is_closed()</code> is true only when every discovered affordance was fired — the condition that licenses a <em>negative</em> claim ("no path exists") rather than just "none was found."</li>
+      </ul>
+
+      <p><strong>Pathfinding</strong> is the primitive every capability check is built on, and it is deliberately model-free — a plan is correct by construction against the graph rather than plausible-looking:</p>
+      <ul>
+        <li><code>path_between(source, target)</code> — deterministic BFS shortest path. Walked edges are explored before <code>inferred</code> ones; both are the same length to BFS, so this only decides which of several equally short paths comes back, and a path made of edges somebody actually fired is a better bet for replay than one assembled out of deductions about site-wide navigation.</li>
+        <li><code>path_to(target)</code> — <code>path_between(entry, target)</code>.</li>
+      </ul>
+
+      <p>The flow layer needs both: <code>path_to</code> reaches the state a capability starts from, and <code>path_between</code> covers the actions that perform it. Splitting a flow at that seam is what lets a probe URL be captured <em>between</em> the two — a deleted resource's own URL is only knowable before it is deleted.</p>
+
+      <p>Also tracks what a crawl didn't finish: <code>unexplored</code> (frontier left when a budget ran out — a retraction of closure) vs. <code>out_of_region</code> (deliberately not followed because it leaves the region under test — a declared boundary, not a gap).</p>
+
+      <p><code>graph_diff(before, after)</code> is the structural diff two graphs reduce to: state ids added/removed, edge keys added/removed. Same computation whether <code>before</code>/<code>after</code> are two crawls of one build (a stability check) or two different builds (the regression signal) — see <code>compare.py</code>.</p>
+
+      <h3><code>crawler.py</code> — drives the graph build</h3>
+      <p>BFS over <code>(state, affordance)</code> pairs, not URLs — a URL crawler never learns that submitting a form lands on shipping, because that transition only exists behind the click. The frontier is finished only when every <code>(state, affordance)</code> pair has been fired or explicitly marked unreachable.</p>
+
+      <p><strong>Key mechanics:</strong></p>
+      <ul>
+        <li><strong>Re-establishing state.</strong> Firing an affordance leaves its source state, so the next affordance from that same state needs the app put back first. Cheap path: if the current page already fingerprints as the target state, nothing to do. Otherwise: clear cookies (a full reset, no server round-trip, since the demo app keys everything to a session cookie), navigate to entry, and replay the recorded path to that state — verified against the fingerprint at each step, not assumed, so a broken replay is recorded as <code>unexplored</code> rather than firing an affordance from the wrong place.</li>
+        <li><strong>Cost.</strong> <code>O(affordances × replay depth)</code>, not <code>O(states)</code> — a graph twice as deep costs far more than twice as much, because every affordance needs its state re-established. Bounded by <code>CrawlConfig</code>: <code>max_states</code> (60), <code>max_actions</code> (400), <code>max_depth</code> (10).</li>
+        <li><strong>Site-wide navigation.</strong> An affordance fired from <code>global_after</code> (default 3) distinct states that always lands in the same place is promoted to "chrome" — recorded as an inferred edge on sight instead of re-fired from every remaining state. Without this, a sidebar of 8 links across 20 states is 160 browser round-trips to learn one fact.</li>
+        <li><strong>Forms.</strong> Filled before a submit is fired (boring, deterministic values from <code>DEFAULT_VALUES</code>/<code>credentials</code>, keyed by field type and label substring) so the happy path gets discovered; an empty-input variant is a separate, explicit crawl concern, not something every submit pays for.</li>
+        <li><strong>Guards.</strong> <code>same_origin_only</code>, <code>exclude_prefixes</code> / <code>stay_under</code> (keep the two demo builds, <code>/</code> and <code>/broken</code>, as two separate crawls rather than one merged graph), and <code>deny_destructive</code> (a text-match seatbelt on labels like "delete"/"cancel subscription" — not a safety net; <strong>never point this at a real host</strong>, it fires every button it finds).</li>
+        <li><strong>Observer hook.</strong> <code>CrawlConfig.on_state(page, state)</code> is called once per newly discovered state, while the browser is still on it. This exists because some states are only ever arrived at by POST: a checkout confirmation has an <code>example_url</code>, but re-requesting it with a GET renders something else entirely, so the single visit the crawl makes is the only chance to read anything off it. Capturing the value surface through the hook is what makes <code>TOTAL_CONSISTENCY</code> bindable at all. Deliberately a callback rather than a flag — the crawl stays a crawl and has no opinion about what anyone wants from a page — and an observer that raises is logged rather than allowed to fail the crawl.</li>
+      </ul>
+
+      <p>Run directly: <code>python -m discovery.crawler &lt;base_url&gt; [--entry /path] [--exclude PREFIX] [--stay-under PREFIX] [--safe] [--repeat N] [--out path.json]</code>. <code>--repeat N</code> crawls N times and diffs the graphs — any difference is crawler instability, not an application change, and is the precondition for trusting a diff between two different builds.</p>
+
+      <h3><code>projections.py</code> — lossy, consumer-specific views</h3>
+      <p>A full graph (every state, every snapshot) is ~150k tokens — unusable as model context. The graph is stored once and projected many times, each view sized for what its consumer actually needs:</p>
+      <ul>
+        <li><code>summary(graph)</code> — ~15 tokens/state: route, affordance kind-counts, named transitions, with site-wide navigation hoisted to one shared block instead of repeated under every state. This is the application map a model holds while it asks for detail on the two or three states it cares about.</li>
+        <li><code>state_detail(graph, state_id)</code> — one state's full affordance list.</li>
+        <li><code>edge_detail(graph, action)</code> — one transition's effect (~50 tokens vs. the ~4000 of two full snapshots).</li>
+        <li><code>mermaid(graph)</code> — flowchart source for a person, navigation omitted by default (otherwise every state links to every other and the flows worth seeing disappear into a mesh).</li>
+        <li><code>html(graph)</code> — a standalone, dependency-free page: stats, an interactive SVG diagram (via <code>svg.py</code>), and full state/transition tables. Meant to sit in <code>runs/</code> next to the crawl that produced it and open as a local file.</li>
+      </ul>
+
+      <p>Run directly: <code>python -m discovery.projections &lt;graph.json&gt; --view {summary,mermaid,html,json} [--state &lt;id&gt;] [--out path]</code>.</p>
+
+      <h3><code>svg.py</code></h3>
+      <p>A from-scratch Sugiyama-style layered graph layout and SVG renderer (no external library, no CDN) so the <code>html()</code> projection stays a self-contained file. Not part of the conceptual pipeline — a rendering detail <code>projections</code> depends on.</p>
+
+      <h3><code>compare.py</code> — what changed between two graphs</h3>
+      <p>Thin CLI around <code>graph_diff</code>: prints routes unique to each side (diffed by <em>route</em>, not state id, since the two demo builds live at different prefixes and their fingerprints never match even when the page is identical), warns if either graph is <code>OPEN</code> (a missing route might just be one the crawl didn't reach, not one that's gone), and — importantly — says plainly when it has nothing to report: matching routes mean no <em>structural</em> change, but a behavioral defect (wrong total, broken sort) doesn't change the graph's shape. Discovery finds <em>where to look</em>; it can't find the bug itself — that's the knowledge engine's invariants, working from the paths and effects discovery recorded.</p>
+
+      <p><code>--identical</code> exits non-zero unless the two graphs match exactly, for use as a stability gate (<code>make crawl-stable</code>).</p>
+
+      <p>There are now two graph-diffing paths, and they are not redundant. <code>compare.py</code> is the standalone CLI for looking at two crawls by hand; <code>regression.differ</code> does the same route-based comparison as one input among several (verdicts, observations, UI) inside a full regression run, and turns the result into ranked findings rather than printed text. Both lean on <code>graph.graph_diff</code>, and both carry the same caveat about open graphs — the differ attaches it to each structural finding, since that is the point where someone would otherwise be misled.</p>
+
+      <h3><code>web_app_inspector.py</code></h3>
+      <p>Stub, not yet implemented.</p>
+    </section>
+
+    <section id="concepts">
+      <h2>Core Concepts</h2>
+      <table class="concept-table">
+        <thead>
+          <tr>
+            <th>Term</th>
+            <th>Meaning</th>
+            <th>Lives In</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>state</strong></td>
+            <td>A place in the app with a distinct set of affordances — not a URL, not a snapshot's data</td>
+            <td><code>graph.State</code></td>
+          </tr>
+          <tr>
+            <td><strong>affordance</strong></td>
+            <td>One actionable element in a state: a link, submit, button, or field</td>
+            <td><code>graph.Affordance</code></td>
+          </tr>
+          <tr>
+            <td><strong>action / edge</strong></td>
+            <td>Firing one affordance from one state landed in another, with recorded inputs and effects</td>
+            <td><code>graph.Action</code></td>
+          </tr>
+          <tr>
+            <td><strong>observed path</strong></td>
+            <td>One concrete walk the crawler took</td>
+            <td>A list of <code>Action</code></td>
+          </tr>
+          <tr>
+            <td><strong>capability</strong></td>
+            <td>A reachability claim — <em>some</em> walk exists from a state satisfying a precondition to one satisfying a goal; not tied to one exact sequence</td>
+            <td><code>semantic.flow_schemas.FlowCapability</code></td>
+          </tr>
+          <tr>
+            <td><strong>closed graph</strong></td>
+            <td>Every discovered affordance was fired; licenses "no path exists" as a real conclusion instead of "none was found yet"</td>
+            <td><code>AppGraph.is_closed()</code></td>
+          </tr>
+          <tr>
+            <td><strong>binding</strong></td>
+            <td>A named value plus the selector that reads it — how a generic invariant reads a specific application</td>
+            <td><code>semantic.flow_schemas.ObservationBinding</code></td>
+          </tr>
+          <tr>
+            <td><strong>probe</strong></td>
+            <td>A request made after a flow, to test whether something still exists</td>
+            <td><code>semantic.flow_schemas.ProbeSpec</code></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>The capability/path distinction is why inserting an upsell step between contact and shipping in checkout doesn't invalidate anything — it's a longer walk to the same capability, not a different one. A crawl, a graph, and a diff all operate at the state/edge level for exactly this reason: so the thing being modeled is what the app can do, not the specific sequence one run happened to take.</p>
+
+      <p>Capability was a term in this document before it was a type anywhere. It is now an enum the flow rule base attaches invariants to, which is what closed the loop: a capability name resolves to a set of invariants through their <code>applies_to</code>, exactly as <code>persistent_mutation</code> already did for the page-level ones.</p>
+    </section>
+
+    <section id="downstream">
+      <h2>Downstream: What Consumes This</h2>
+      <p>Discovery hands off three artifacts. Each carries a guarantee that something above it depends on, and the guarantee is the interesting part:</p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Artifact</th>
+            <th>Consumer</th>
+            <th>The Guarantee It Rests On</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>projections.summary(graph)</code> + the value surface</td>
+            <td><code>semantic.flow_classifier</code></td>
+            <td>The map is cheap enough to reason over whole (~3k tokens, not ~150k)</td>
+          </tr>
+          <tr>
+            <td><code>AppGraph.path_to</code> / <code>path_between</code></td>
+            <td><code>knowledge.flows</code> instantiation</td>
+            <td>A path is walkable by construction, so a materialized instance is replayable</td>
+          </tr>
+          <tr>
+            <td><code>fingerprint(snapshot)</code></td>
+            <td><code>runner.flow_runner</code> arrival checks</td>
+            <td>A state recorded once is recognisable again</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>That last one is why the flow runner can report <strong>inconclusive</strong> honestly. Every walk ends by fingerprinting the page and comparing it against the state the graph predicted. A path that executes cleanly and lands somewhere else is the most misleading thing a flow test can do — every observation after it reads a real page, parses fine, and describes the wrong one — so arrival is verified rather than assumed, and a flow that could not be completed is reported as untested instead of as a defect.</p>
+
+      <p><code>fingerprint</code>'s <code>strip_prefix</code> is the other half of that: without it a suite recorded against one mount point could never be replayed against another, and a changed path would read as a total regression.</p>
+    </section>
+
+    <section id="running">
+      <h2>Running It</h2>
+
+      <h3>Discovery on its own:</h3>
+      <pre><code>make crawl               # map the sound build -> runs/graphs/graph_sound.json
+make crawl-broken        # map the broken build -> runs/graphs/graph_broken.json
+make crawl-stable        # crawl twice and diff — proves fingerprint stability
+make map                 # print the summary() an LLM would be shown
+make mermaid             # print mermaid source
+make draw / make graph   # render + open the HTML diagram
+make graph-diff          # structural diff of the sound vs. broken graphs
+make values URL=/catalog # print one page's readable value surface</code></pre>
+
+      <h3>Discovery as part of a whole run:</h3>
+      <pre><code>make baseline            # crawl + classify + run flows, record to runs/baseline-sound
+make baseline-cached     # same, reusing saved flow candidates (no LLM)
+make regression          # replay that baseline against /broken — expect regressions
+make regression-clean    # replay it against the sound build — expect nothing
+make flow-rules          # show the flow invariants the rule base holds</code></pre>
+    </section>
+
+    <section id="gaps">
+      <h2>Known Gaps</h2>
+      <p>The gap this document used to describe — "the runner and knowledge engine still assume page-shaped state" — is closed. <code>knowledge.flows</code> and <code>runner.flow_runner</code> consume <code>AppGraph</code> and its projections directly, and a flow that cannot be completed now reports inconclusive with the state it actually reached. What remains:</p>
+
+      <ul>
+        <li>
+          <strong>The crawler does not branch on <code>&lt;select&gt;</code> options.</strong> <code>_value_for</code> deliberately leaves non-text controls alone ("selects already carry a default"), so a catalog is only ever crawled at its default sort — <code>sort=name-asc</code> on the demo app. The graph therefore contains no price-sorted state, and <code>ORDERING_CONSISTENCY</code> has nothing to instantiate against: the invariant loads and its <code>sorted_asc</code> relation behaves correctly on the two builds' price columns when handed them directly, but no end-to-end run has ever fired it. Exercising it needs the crawl to treat a select's options as distinct affordances, which multiplies the frontier and so wants a budget of its own.
+        </li>
+        <li>
+          <strong>Nothing here has an automated test.</strong> There is no <code>tests/</code> directory on this branch; every claim above was checked by running the pipeline against the demo app's two builds by hand. <code>make crawl-stable</code> and <code>make regression-clean</code> are the two reproducibility checks that exist, and both are manual.
+        </li>
+        <li>
+          <strong><code>Action.requires</code> / <code>Action.establishes</code> are declared and unused.</strong> Pathfinding is still pure topology, so a path is walkable because the crawler walked it, not because its preconditions were checked. That holds up for replay and would not hold up for planning a walk the crawler never took.
+        </li>
+        <li>
+          <strong><code>is_closed()</code> is cheap to lose and expensive to earn.</strong> Every structural claim about absence depends on it, and any budget being hit retracts it. <code>make crawl-stable</code> establishes that the crawler reproduces itself; the regression differ attaches an explicit caveat to structural findings when either side's graph is open.
+        </li>
+        <li>
+          <strong><code>web_app_inspector.py</code> is still a stub.</strong>
+        </li>
+      </ul>
+
+      <p>One operational note that is not a gap but reads like one: the crawl fires every button it finds, including destructive ones. <code>deny_destructive</code> is a text-match seatbelt, not a safety net. Point this at a development environment.</p>
+    </section>
+  </main>
+</div>
+
+<script>
+// Simple TOC active link tracking
+document.addEventListener('DOMContentLoaded', function() {
+  const sections = document.querySelectorAll('section[id]');
+  const tocLinks = document.querySelectorAll('.toc a');
+
+  function updateActiveLink() {
+    const currentPosition = window.scrollY + 100;
+
+    sections.forEach(section => {
+      const sectionTop = section.offsetTop;
+      const sectionBottom = sectionTop + section.offsetHeight;
+
+      if (currentPosition >= sectionTop && currentPosition < sectionBottom) {
+        tocLinks.forEach(link => {
+          link.classList.remove('active');
+          if (link.getAttribute('href') === '#' + section.id) {
+            link.classList.add('active');
+          }
+        });
+      }
+    });
+  }
+
+  window.addEventListener('scroll', updateActiveLink);
+  updateActiveLink();
+});
+</script>
+
+</body>
+</html>

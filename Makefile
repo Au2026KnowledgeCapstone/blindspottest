@@ -4,16 +4,23 @@ PORT ?= 3000
 BASE := http://127.0.0.1:$(PORT)
 
 .DEFAULT_GOAL := help
-.PHONY: help install demo broken profile project edit all scan run pages watch dash rules inspect truth clean \
-        crawl crawl-broken crawl-stable map mermaid draw graph graph-diff \
-        baseline baseline-cached regression regression-clean flow-rules values
+.PHONY: help install demo scan edit run dash rules inspect truth values clean \
+        crawl crawl-broken crawl-stable view draw graph graph-diff \
+        baseline baseline-cached regression regression-clean
 
-GRAPHS := runs/graphs
+GRAPHS   := runs/graphs
+BASELINE := runs/baseline-sound
 
 # Is something already listening on $(PORT)?
 UP := $(PY) -c "import socket,sys; sys.exit(0 if socket.socket().connect_ex(('127.0.0.1',$(PORT)))==0 else 1)"
 
-# Run a scan with the demo app available. If the app is already running
+# Shell prologue that normalizes `$$u`: a bare path is taken as relative to
+# the demo app, a full URL is used as given. This is what lets one `scan`
+# target replace a per-page target for every route — the Makefile was
+# accumulating one bookmark per URL, which is what made it unreadable.
+ABS = case "$$u" in http*) ;; *) u="$(BASE)$$u";; esac
+
+# Run a command with the demo app available. If the app is already running
 # (someone left `make run` going) it is reused and left alone; otherwise it is
 # started, waited for, and stopped again on the way out — including on Ctrl-C
 # or failure, so a stray server is never left behind.
@@ -35,10 +42,14 @@ endef
 
 help:  ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
-		| awk -F':.*?## ' '{printf "  \033[36m%-13s\033[0m %s\n", $$1, $$2}'
+		| awk -F':.*?## ' '{printf "  \033[36m%-17s\033[0m %s\n", $$1, $$2}'
 	@echo
-	@echo "  Start here:  make demo        (scan one page for a regression)"
-	@echo "               make graph       (map the whole app and draw it)"
+	@echo "  Start here:  make demo        (scan one page — the original check)"
+	@echo "               make baseline    (map the app, record a flow baseline)"
+	@echo "               make regression  (replay it against the broken build)"
+	@echo
+	@echo "  URL= takes a path (/broken/profile) or a full URL."
+	@echo "  ARGS= is passed through to the underlying command."
 	@echo "  Each target starts and stops the demo app for you."
 
 install:  ## Create the venv and install dependencies
@@ -46,48 +57,41 @@ install:  ## Create the venv and install dependencies
 	$(PIP) -q install -r requirements.txt
 	$(PY) -m playwright install chromium
 
-demo: broken  ## Start here — scan the page with the planted regression
+# --------------------------------------------------------------------------
+# Single-page scans — the original MVP pipeline
+# --------------------------------------------------------------------------
 
-broken:  ## Scan the broken profile page — expect a violation
+demo:  ## Start here — scan the page with the planted regression
 	$(call with_app, $(PY) main.py $(BASE)/broken/profile $(ARGS))
 
-profile:  ## Scan /profile — expect all pass
-	$(call with_app, $(PY) main.py $(BASE)/profile $(ARGS))
-
-project:  ## Scan /project-settings — expect all pass
-	$(call with_app, $(PY) main.py $(BASE)/project-settings $(ARGS))
+scan:  ## Scan one page: make scan URL=/broken/profile [ARGS=--headed]
+	@test -n "$(URL)" || { echo "usage: make scan URL=/broken/profile"; exit 2; }
+	$(call with_app, u="$(URL)"; $(ABS); $(PY) main.py "$$u" $(ARGS))
 
 edit:  ## Scan a project edit form — expect inconclusive: the commit navigates away
 	$(call with_app, $(PY) main.py $(BASE)/projects/1/edit $(ARGS))
 
-all:  ## Scan the three single-page flows, then build the dashboard
-	$(call with_app, \
-	  $(PY) main.py $(BASE)/profile          $(ARGS) || true; \
-	  $(PY) main.py $(BASE)/broken/profile   $(ARGS) || true; \
-	  $(PY) main.py $(BASE)/project-settings $(ARGS) || true)
-	@$(PY) -m reporting.dashboard
+# --------------------------------------------------------------------------
+# Serving, reporting, and looking at things
+# --------------------------------------------------------------------------
 
-scan:  ## Scan any URL: make scan URL=http://localhost:8080/settings
-	@test -n "$(URL)" || { echo "usage: make scan URL=<url>"; exit 2; }
-	$(PY) main.py $(URL) $(ARGS)
-
-pages:  ## Open the demo app in your browser and keep it running
-	$(PY) -m demo_app.app $(PORT) --open
-
-watch:  ## Scan the broken page with the browser visible
-	$(call with_app, $(PY) main.py $(BASE)/broken/profile --headed $(ARGS))
-
-run:  ## Serve the demo app in the foreground (no browser)
-	$(PY) -m demo_app.app $(PORT)
+run:  ## Serve the demo app in the foreground; OPEN=1 also opens a browser
+	$(PY) -m demo_app.app $(PORT) $(if $(OPEN),--open,)
 
 dash:  ## Build runs/dashboard.html from recorded runs and open it
 	$(PY) -m reporting.dashboard --open
 
-rules:  ## Print the loaded rule base (no browser, no network)
-	$(PY) -m knowledge.engine
+rules:  ## Print both rule bases — page-level and flow-level (no browser)
+	@$(PY) -m knowledge.engine
+	@$(PY) -m knowledge.flows
 
-inspect:  ## Print a page snapshot: make inspect URL=... (no LLM)
-	$(call with_app, $(PY) -m discovery.page_inspector $(or $(URL),$(BASE)/profile))
+inspect:  ## Print a page's control snapshot: make inspect URL=/catalog (no LLM)
+	$(call with_app, u="$(or $(URL),/profile)"; $(ABS); \
+	  $(PY) -m discovery.page_inspector "$$u")
+
+values:  ## Print a page's readable value surface: make values URL=/catalog
+	$(call with_app, u="$(or $(URL),/catalog)"; $(ABS); \
+	  $(PY) -m discovery.readable "$$u" --text)
 
 truth:  ## Print what each demo flow is and where its defect is (no browser)
 	$(PY) -m demo_app.manifest
@@ -112,13 +116,13 @@ crawl-stable:  ## Crawl twice and diff — proves state identity does not drift
 	$(call with_app, $(PY) -u -m discovery.crawler $(BASE) \
 	  --exclude /broken --repeat 2 --out $(GRAPHS)/graph_sound.json $(ARGS))
 
-map:  ## Print the app map an LLM would be shown (needs make crawl first)
-	@$(PY) -m discovery.projections $(GRAPHS)/graph_sound.json --view summary
+view:  ## Print a graph view: make view VIEW=summary|mermaid|json
+	@test -f $(GRAPHS)/graph_sound.json \
+	  || { echo "no graph yet — run 'make crawl' first"; exit 2; }
+	@$(PY) -m discovery.projections $(GRAPHS)/graph_sound.json \
+	  --view $(or $(VIEW),summary)
 
-mermaid:  ## Print the graph as mermaid source
-	@$(PY) -m discovery.projections $(GRAPHS)/graph_sound.json --view mermaid
-
-draw:  ## Draw the graph you already crawled and open it (no re-crawl)
+draw:  ## Render the crawled graph as HTML and open it (no re-crawl)
 	@test -f $(GRAPHS)/graph_sound.json \
 	  || { echo "no graph yet — run 'make crawl' first"; exit 2; }
 	@$(PY) -m discovery.projections $(GRAPHS)/graph_sound.json \
@@ -140,8 +144,6 @@ graph-diff:  ## Compare the sound and broken graphs (needs both crawls)
 # one and replaying it against the other is the same operation you would run
 # against yesterday's deploy and today's.
 # --------------------------------------------------------------------------
-
-BASELINE := runs/baseline-sound
 
 baseline:  ## Record a baseline of the sound build (crawl + flows, uses the LLM)
 	$(call with_app, $(PY) -u main.py --baseline --exclude /broken \
@@ -166,13 +168,6 @@ regression-clean:  ## Replay the baseline against the sound build — expect not
 	  || { echo "no baseline yet — run 'make baseline' first"; exit 2; }
 	$(call with_app, $(PY) -u main.py --regression \
 	  --baseline-dir $(BASELINE) --exclude /broken $(BASE) $(ARGS))
-
-flow-rules:  ## Show the flow invariants the rule base holds
-	@$(PY) -m knowledge.flows
-
-values:  ## Print the readable value surface of one page (URL=...)
-	@test -n "$(URL)" || { echo "usage: make values URL=/catalog"; exit 2; }
-	$(call with_app, $(PY) -m discovery.readable "$(BASE)$(URL)" --text)
 
 clean:  ## Remove caches and run records
 	rm -rf runs __pycache__ */__pycache__

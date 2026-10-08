@@ -172,7 +172,7 @@ build reports no regressions:
 ## The demo application
 
 Flow discovery needs flows to discover, so the demo is now a small but whole app
-rather than three forms. `make run` serves it, `make pages` opens it.
+rather than three forms. `make run` serves it; `make run OPEN=1` also opens it.
 
 ```bash
 /                    overview
@@ -222,14 +222,19 @@ structurally cannot see: they are conditions about a *flow's outcome* — someth
 no longer existing, an order between rows, a sum across lines — not about one
 field surviving a reload.
 
-### What the current pipeline does with it
+### What the page pipeline does with it
 
-`make broken` still works exactly as before — it finds the dropped Bio on a
+`make demo` still works exactly as before — it finds the dropped Bio on a
 single page. `make edit` points the same pipeline at the project edit form and
 comes back **inconclusive**: the commit navigates to the detail page, so when the
 runner reloads and goes looking for the field it was watching, the field isn't
 there. Nothing is wrong with the application. The test is shaped like a page and
-the behaviour is shaped like a flow, which is the gap to close.
+the behaviour is shaped like a flow.
+
+That was the gap. `make baseline` and `make regression` close it — the flow
+runner verifies arrival against the state the graph predicted, so a walk that
+ends somewhere unexpected says so instead of quietly reading the wrong page.
+`make edit` is kept as the live demonstration of the original problem.
 
 ### Ground truth
 
