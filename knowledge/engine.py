@@ -117,13 +117,149 @@ STEP_RECORDS: dict[str, str | None] = {
 # Relations
 # --------------------------------------------------------------------------
 
-_RELATION_RE = re.compile(r"^\s*(\S+)\s*(==|!=)\s*(\S+)\s*$")
+# `<=` and `>=` precede `<` and `>` in the alternation, so the two-character
+# operators are never split by a greedy single-character match.
+_RELATION_RE = re.compile(r"^\s*(\S+)\s*(==|!=|<=|>=|<|>)\s*(\S+)\s*$")
 _LITERALS = {"true": True, "false": False, "null": None}
+
+# A single-argument call over one observation, e.g. `sum(line_totals)`. One
+# argument and no spaces, deliberately: this is a relation language, not an
+# expression language, and anything needing more belongs in a named step that
+# records its answer as an observation.
+_CALL_RE = re.compile(r"^([a-z_]+)\(([A-Za-z_][A-Za-z0-9_]*)\)$")
+
+
+# --------------------------------------------------------------------------
+# Vocabulary: relation functions
+#
+# Page-level invariants only ever needed to compare two scalars. Flow-level
+# ones assert over collections — the total equals the sum of the lines, the
+# rows are in the order that was asked for — and none of those is expressible
+# as `a == b`. These are the named reductions the rule base may apply to an
+# observation, and the same split holds as everywhere else: Python supplies
+# the names, the JSON chooses which to use.
+# --------------------------------------------------------------------------
+
+
+class RelationError(Exception):
+    """A relation could not be evaluated against the observations it was given.
+
+    Distinct from `InvariantError`, which is a malformed rule base caught at
+    load time. This is a well-formed relation meeting data it cannot reduce —
+    `sum` over a list holding `None` because one row failed to parse. The
+    honest verdict is inconclusive, never a violation: the application may be
+    perfectly correct and the observation simply unreadable.
+    """
+
+
+def _as_list(value: Any, fn: str) -> list:
+    if not isinstance(value, (list, tuple)):
+        raise RelationError(f"{fn}() needs a list, got {type(value).__name__}")
+    return list(value)
+
+
+def _as_numbers(value: Any, fn: str) -> list[float]:
+    items = _as_list(value, fn)
+    numbers = []
+    for item in items:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            raise RelationError(
+                f"{fn}() needs numbers, got {item!r} in the list"
+            )
+        numbers.append(float(item))
+    return numbers
+
+
+def _fn_sum(value: Any) -> float:
+    return sum(_as_numbers(value, "sum"))
+
+
+def _fn_count(value: Any) -> int:
+    return len(_as_list(value, "count"))
+
+
+def _fn_sorted_asc(value: Any) -> bool:
+    """True when the list never decreases.
+
+    Non-strict on purpose: two products at the same price are not a sort
+    defect, and requiring strictness would report one every time a catalog
+    holds a duplicate value.
+    """
+    numbers = _as_numbers(value, "sorted_asc")
+    return all(a <= b for a, b in zip(numbers, numbers[1:]))
+
+
+def _fn_sorted_desc(value: Any) -> bool:
+    numbers = _as_numbers(value, "sorted_desc")
+    return all(a >= b for a, b in zip(numbers, numbers[1:]))
+
+
+def _fn_unique(value: Any) -> bool:
+    items = _as_list(value, "unique")
+    return len(items) == len({json.dumps(i, sort_keys=True) for i in items})
+
+
+def _fn_len(value: Any) -> int:
+    """Length of a list or string. `count` is the list-only spelling."""
+    if isinstance(value, str):
+        return len(value)
+    return len(_as_list(value, "len"))
+
+
+RELATION_FUNCTIONS: dict[str, Callable[[Any], Any]] = {
+    "sum": _fn_sum,
+    "count": _fn_count,
+    "len": _fn_len,
+    "sorted_asc": _fn_sorted_asc,
+    "sorted_desc": _fn_sorted_desc,
+    "unique": _fn_unique,
+}
+
+# Money arrives as a float parsed out of rendered text, so `12.80 + 7.20` is
+# not reliably `20.00`. A sum over line items compared for exact equality
+# against a rendered total would report a violation on representation error
+# alone, which is a false defect in the one invariant most likely to matter.
+_FLOAT_TOLERANCE = 1e-6
+
+
+def _compare(left: Any, right: Any, operator: str) -> bool:
+    numeric = all(
+        isinstance(v, (int, float)) and not isinstance(v, bool) for v in (left, right)
+    )
+    if operator in ("==", "!="):
+        if numeric:
+            equal = abs(float(left) - float(right)) <= _FLOAT_TOLERANCE
+        else:
+            equal = left == right
+        return equal if operator == "==" else not equal
+
+    if not numeric:
+        raise RelationError(
+            f"{operator} needs numbers, got {type(left).__name__} and "
+            f"{type(right).__name__}"
+        )
+    if operator == "<":
+        return left < right
+    if operator == ">":
+        return left > right
+    if operator == "<=":
+        return left <= right
+    return left >= right
 
 
 @dataclass(frozen=True)
 class Relation:
-    """A comparison between two observations, or an observation and a literal."""
+    """A comparison between two operands.
+
+    An operand is a literal, the name of an observation, or a named function
+    applied to one observation:
+
+        committed_value == final_value       scalar equality
+        sum(line_totals) == order_total      a reduction over a collection
+        sorted_asc(row_prices) == true       an order predicate
+        resource_reachable == false          a probe's answer
+        count(rows) == stated_count          two observations, one reduced
+    """
 
     source: str
     left: str
@@ -135,16 +271,46 @@ class Relation:
         match = _RELATION_RE.match(text)
         if not match:
             raise InvariantError(
-                f"cannot parse relation {text!r}; expected '<operand> == <operand>' "
-                f"or '!='"
+                f"cannot parse relation {text!r}; expected "
+                f"'<operand> <op> <operand>' where <op> is one of "
+                f"==, !=, <, >, <=, >="
             )
         left, operator, right = match.groups()
+
+        # A call to a function the vocabulary does not have is a rule-base
+        # typo, and catching it here means it surfaces at load time rather
+        # than as an inconclusive verdict halfway through a browser run.
+        for token in (left, right):
+            call = _CALL_RE.match(token)
+            if call and call.group(1) not in RELATION_FUNCTIONS:
+                raise InvariantError(
+                    f"unknown relation function {call.group(1)!r} in {text!r}. "
+                    f"Known: {', '.join(sorted(RELATION_FUNCTIONS))}"
+                )
+            if not call and "(" in token:
+                raise InvariantError(
+                    f"cannot parse operand {token!r} in {text!r}; a function "
+                    f"call takes exactly one observation name and no spaces, "
+                    f"e.g. sum(line_totals)"
+                )
+
         return cls(source=text, left=left, operator=operator, right=right)
 
     @property
     def operands(self) -> set[str]:
-        """Operand names that must come from observations, excluding literals."""
-        return {t for t in (self.left, self.right) if not self._is_literal(t)}
+        """Observation names the relation reads, excluding literals.
+
+        A call contributes the name it wraps: `sum(line_totals)` needs
+        `line_totals` to have been recorded, so a procedure that never
+        records it is a rule-base bug the loader can catch.
+        """
+        names = set()
+        for token in (self.left, self.right):
+            if self._is_literal(token):
+                continue
+            call = _CALL_RE.match(token)
+            names.add(call.group(2) if call else token)
+        return names
 
     @staticmethod
     def _is_literal(token: str) -> bool:
@@ -167,12 +333,23 @@ class Relation:
             return float(token) if "." in token else int(token)
         except ValueError:
             pass
+
+        call = _CALL_RE.match(token)
+        if call:
+            name, argument = call.group(1), call.group(2)
+            return RELATION_FUNCTIONS[name](observations[argument])
         return observations[token]
 
     def evaluate(self, observations: dict) -> bool:
+        """Whether the relation holds.
+
+        Raises `RelationError` when the observations cannot support the
+        comparison. Callers turn that into an inconclusive verdict rather
+        than letting a parse failure in one row read as a defect.
+        """
         left = self._resolve(self.left, observations)
         right = self._resolve(self.right, observations)
-        return left == right if self.operator == "==" else left != right
+        return _compare(left, right, self.operator)
 
     def missing_operands(self, observations: dict) -> set[str]:
         return {name for name in self.operands if name not in observations}
@@ -308,6 +485,15 @@ class ElementRef:
             selector=element["selector"],
         )
 
+    @classmethod
+    def from_dict(cls, data: dict) -> ElementRef:
+        return cls(
+            element_id=data["element_id"],
+            accessible_name=data.get("accessible_name"),
+            locator_strategy=data.get("locator_strategy") or {},
+            selector=data.get("selector", ""),
+        )
+
 
 @dataclass(frozen=True)
 class TestInstance:
@@ -362,6 +548,36 @@ class TestInstance:
             "precondition": self.precondition,
             "success_signal": self.success_signal,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> TestInstance:
+        """Rebuild an instance from its record.
+
+        This is what makes a baseline re-runnable: every value the run needs
+        was materialized before execution, so loading one back reproduces the
+        same test rather than a freshly-generated lookalike. A new mutation
+        value would mean the regression run and the baseline were never
+        asserting the same thing.
+        """
+        commit = data.get("commit_action")
+        return cls(
+            test_id=data["test_id"],
+            invariant=data["invariant"],
+            url=data["url"],
+            target=ElementRef.from_dict(data["target"]),
+            commit_action=ElementRef.from_dict(commit) if commit else None,
+            original_value=data.get("original_value"),
+            mutation_value=data.get("mutation_value"),
+            mutation_strategy=data.get("mutation_strategy", "text"),
+            verification_strategy=data.get(
+                "verification_strategy", "reload_and_compare"
+            ),
+            procedure=tuple(data.get("procedure", ())),
+            teardown=tuple(data.get("teardown", ())),
+            expected_relation=data["expected_relation"],
+            precondition=data.get("precondition"),
+            success_signal=data.get("success_signal"),
+        )
 
     def describe(self) -> str:
         """The instance as a human-readable assertion."""
@@ -464,6 +680,157 @@ class Verdict:
     severity: str | None = None
     summary: str | None = None
 
+    def to_dict(self) -> dict:
+        return {
+            "invariant_id": self.invariant_id,
+            "status": self.status.value,
+            "detail": self.detail,
+            "observations": self.observations,
+            "severity": self.severity,
+            "summary": self.summary,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Verdict:
+        return cls(
+            invariant_id=data["invariant_id"],
+            status=Status(data["status"]),
+            detail=data.get("detail", ""),
+            observations=data.get("observations", {}),
+            severity=data.get("severity"),
+            summary=data.get("summary"),
+        )
+
+
+def _try_evaluate(relation: Relation, observations: dict) -> tuple[bool | None, str]:
+    """Evaluate a relation, reporting unevaluable instead of raising.
+
+    A relation that cannot be reduced against its observations is not evidence
+    of a defect — a currency string one row failed to parse makes `sum`
+    impossible without telling us anything about the application. The honest
+    answer is that the test did not run, so `None` here becomes inconclusive.
+    """
+    try:
+        return relation.evaluate(observations), ""
+    except RelationError as exc:
+        return None, str(exc)
+    except Exception as exc:  # a malformed observation, not a verdict
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def decide(
+    invariant_id: str,
+    expected: Relation,
+    precondition: Relation | None,
+    observations: dict,
+    *,
+    on_violation: dict | None = None,
+    violation_detail: Callable[[dict], str] | None = None,
+) -> Verdict:
+    """Turn observations into a verdict for one invariant.
+
+    Shared by the page-level and flow-level engines so the logic that decides
+    holds / violated / inconclusive exists exactly once. The two differ only
+    in what they observe and how they phrase a failure, never in how a
+    relation becomes a verdict.
+
+    The relation is checked before the precondition, and the order matters. A
+    precondition exists to stop us blaming the application for a commit we
+    never confirmed — it must not discard a pass. If the expected relation
+    held, the invariant held whether or not a confirmation appeared; demoting
+    that to inconclusive would report a correctly-working application as
+    untested.
+    """
+    missing = expected.missing_operands(observations)
+    if missing:
+        return Verdict(
+            invariant_id=invariant_id,
+            status=Status.INCONCLUSIVE,
+            detail=(
+                f"run did not record {', '.join(sorted(missing))}; "
+                f"cannot evaluate {expected.source}"
+            ),
+            observations=observations,
+        )
+
+    held, problem = _try_evaluate(expected, observations)
+    if held is None:
+        return Verdict(
+            invariant_id=invariant_id,
+            status=Status.INCONCLUSIVE,
+            detail=f"could not evaluate {expected.source}: {problem}",
+            observations=observations,
+        )
+
+    if held:
+        unconfirmed = False
+        if precondition is not None:
+            if precondition.missing_operands(observations):
+                unconfirmed = True
+            else:
+                met, _ = _try_evaluate(precondition, observations)
+                unconfirmed = met is not True
+        detail = f"{expected.source} held"
+        if unconfirmed:
+            detail += (
+                f" (note: {precondition.source} was not observed — the "
+                f"relation held, but the commit was never confirmed)"
+            )
+        return Verdict(
+            invariant_id=invariant_id,
+            status=Status.HOLDS,
+            detail=detail,
+            observations=observations,
+        )
+
+    # The relation failed. Only now does an unconfirmed commit matter: we
+    # never earned the right to expect the outcome, so this is inconclusive
+    # rather than a defect.
+    if precondition is not None:
+        if precondition.missing_operands(observations):
+            return Verdict(
+                invariant_id=invariant_id,
+                status=Status.INCONCLUSIVE,
+                detail=f"precondition {precondition.source} was not observed",
+                observations=observations,
+            )
+        met, problem = _try_evaluate(precondition, observations)
+        if met is None:
+            return Verdict(
+                invariant_id=invariant_id,
+                status=Status.INCONCLUSIVE,
+                detail=(
+                    f"could not evaluate precondition {precondition.source}: "
+                    f"{problem}"
+                ),
+                observations=observations,
+            )
+        if not met:
+            return Verdict(
+                invariant_id=invariant_id,
+                status=Status.INCONCLUSIVE,
+                detail=(
+                    f"precondition {precondition.source} did not hold; the "
+                    f"commit was never confirmed, so the outcome is untested"
+                ),
+                observations=observations,
+            )
+
+    on_violation = on_violation or {}
+    detail = (
+        violation_detail(observations)
+        if violation_detail
+        else f"{expected.source} did not hold"
+    )
+    return Verdict(
+        invariant_id=invariant_id,
+        status=Status.VIOLATED,
+        detail=detail,
+        observations=observations,
+        severity=on_violation.get("severity"),
+        summary=on_violation.get("summary"),
+    )
+
 
 # --------------------------------------------------------------------------
 # Engine
@@ -482,9 +849,15 @@ class KnowledgeEngine:
 
     @classmethod
     def load(cls, directory: Path | str = INVARIANTS_DIR) -> KnowledgeEngine:
-        """Load every *.json in `directory`.
+        """Load every page-level *.json in `directory`.
 
         A file may hold one invariant object or a {"invariants": [...]} wrapper.
+
+        Files declaring `"kind": "flow"` are skipped: flow invariants name a
+        different requirement and step vocabulary, so parsing one here would
+        fail on a perfectly valid rule. Selecting by declared kind rather than
+        by filename lets both rule bases share this directory without either
+        loader knowing the other's files.
         """
         directory = Path(directory)
         if not directory.is_dir():
@@ -495,6 +868,8 @@ class KnowledgeEngine:
 
         for path in sorted(directory.glob("*.json")):
             data = json.loads(path.read_text())
+            if isinstance(data, dict) and data.get("kind", "page") != "page":
+                continue
             entries = data.get("invariants", [data]) if isinstance(data, dict) else data
             for entry in entries:
                 inv = Invariant.from_dict(entry, path)
@@ -637,78 +1012,21 @@ class KnowledgeEngine:
 
     def evaluate(self, invariant: Invariant, observations: dict) -> Verdict:
         """Decide whether the invariant held, given what the runner observed."""
-        missing = invariant.expected_relation.missing_operands(observations)
-        if missing:
-            return Verdict(
-                invariant_id=invariant.id,
-                status=Status.INCONCLUSIVE,
-                detail=(
-                    f"run did not record {', '.join(sorted(missing))}; "
-                    f"cannot evaluate {invariant.expected_relation.source}"
-                ),
-                observations=observations,
-            )
 
-        # The relation is checked before the precondition, and the order
-        # matters. A precondition exists to stop us blaming the page for a
-        # commit we never confirmed — it must not discard a pass. If the value
-        # survived the reload, persistence held whether or not a confirmation
-        # banner appeared; demoting that to inconclusive would report a
-        # correctly-working page as untested.
-        if invariant.expected_relation.evaluate(observations):
-            unconfirmed = (
-                invariant.precondition is not None
-                and (
-                    invariant.precondition.missing_operands(observations)
-                    or not invariant.precondition.evaluate(observations)
-                )
-            )
-            detail = f"{invariant.expected_relation.source} held"
-            if unconfirmed:
-                detail += (
-                    f" (note: {invariant.precondition.source} was not observed — "
-                    f"the value persisted, but the commit was never confirmed)"
-                )
-            return Verdict(
-                invariant_id=invariant.id,
-                status=Status.HOLDS,
-                detail=detail,
-                observations=observations,
-            )
-
-        # The relation failed. Only now does an unconfirmed commit matter: we
-        # never earned the right to expect persistence, so this is inconclusive
-        # rather than a defect.
-        if invariant.precondition is not None:
-            if invariant.precondition.missing_operands(observations):
-                return Verdict(
-                    invariant_id=invariant.id,
-                    status=Status.INCONCLUSIVE,
-                    detail=f"precondition {invariant.precondition.source} was not observed",
-                    observations=observations,
-                )
-            if not invariant.precondition.evaluate(observations):
-                return Verdict(
-                    invariant_id=invariant.id,
-                    status=Status.INCONCLUSIVE,
-                    detail=(
-                        f"precondition {invariant.precondition.source} did not hold; "
-                        f"the commit was never confirmed, so persistence is untested"
-                    ),
-                    observations=observations,
-                )
-
-        return Verdict(
-            invariant_id=invariant.id,
-            status=Status.VIOLATED,
-            detail=(
+        def detail(obs: dict) -> str:
+            return (
                 f"{invariant.expected_relation.source} did not hold: "
-                f"committed {observations.get('committed_value')!r}, "
-                f"found {observations.get('final_value')!r} after reload"
-            ),
-            observations=observations,
-            severity=invariant.on_violation.get("severity"),
-            summary=invariant.on_violation.get("summary"),
+                f"committed {obs.get('committed_value')!r}, "
+                f"found {obs.get('final_value')!r} after reload"
+            )
+
+        return decide(
+            invariant.id,
+            invariant.expected_relation,
+            invariant.precondition,
+            observations,
+            on_violation=invariant.on_violation,
+            violation_detail=detail,
         )
 
 

@@ -27,6 +27,7 @@ Per-element keys, all optional except `id`, `tag` and `selector`:
     visible_label  <label> text, only when it disagrees with `label`
     placeholder    raw placeholder attribute
     text           visible text of buttons and links
+    href           resolved destination, links only
     value          current value; array for multi-select
     checked        true/false/"mixed" for checkboxes, radios, switches
     nearby_text    helper/validation/hint text near the element
@@ -117,6 +118,7 @@ _EXTRACT_JS = r"""
   // deliberately excluded: button/link text is reported as `text` instead, so
   // the two never duplicate each other.
   function accessibleName(el) {
+    const tag = el.tagName.toLowerCase();
     const aria = squash(el.getAttribute('aria-label'));
     if (aria) return aria;
 
@@ -130,11 +132,18 @@ _EXTRACT_JS = r"""
       if (parts.length) return parts.join(' ');
     }
 
-    return labelElementText(el)
+    const labelled = labelElementText(el)
         || squash(el.getAttribute('placeholder'))
-        || squash(el.getAttribute('title'))
-        || el.getAttribute('name')
-        || null;
+        || squash(el.getAttribute('title'));
+    if (labelled) return labelled;
+
+    // `name` is a form submission key, not an accessible name. It is a decent
+    // last resort for an unlabelled field, but never for a button: a button's
+    // name comes from its content, and reporting name="action" here would hand
+    // the runner a locator that matches nothing.
+    const type = tag === 'input' ? inputType(el) : null;
+    const isButton = tag === 'button' || VALUELESS_INPUTS.has(type);
+    return isButton ? null : (el.getAttribute('name') || null);
   }
 
   // Context that isn't the label: helper text, character limits, validation
@@ -350,6 +359,14 @@ _EXTRACT_JS = r"""
     if (tag === 'button' || role === 'button' || role === 'link') {
       text = textOf(el) || squash(el.getAttribute('value'));
       if (text) entry.text = text;
+    }
+
+    // Where a link goes, resolved against the document. A crawler needs this
+    // to decide whether following it leaves the region under test, which it
+    // has to know *before* clicking rather than after.
+    if (tag === 'a' && el.hasAttribute('href')) {
+      const raw = el.getAttribute('href');
+      if (raw && !raw.startsWith('javascript:')) entry.href = el.href;
     }
 
     const value = valueFor(el);

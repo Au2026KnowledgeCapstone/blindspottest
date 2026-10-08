@@ -1,0 +1,181 @@
+{
+  "schema_version": "1.0",
+  "kind": "flow",
+  "invariants": [
+    {
+      "id": "TOTAL_CONSISTENCY",
+      "name": "Total Consistency Invariant",
+      "description": "A transaction's stated total must equal the sum of the lines it displays. The path taken to reach the total is not the specification; agreeing with itself is.",
+      "applies_to": [
+        "multi_step_transaction"
+      ],
+      "requirements": [
+        "goal_reachable",
+        "goal_differs_from_setup"
+      ],
+      "bindings": [
+        "line_totals",
+        "order_total"
+      ],
+      "procedure": [
+        "walk_setup",
+        "walk_goal",
+        "observe_bindings"
+      ],
+      "precondition": "goal_reached == true",
+      "expected_relation": "sum(line_totals) == order_total",
+      "on_violation": {
+        "severity": "high",
+        "summary": "The stated total does not equal the sum of the lines shown, so the customer is charged an amount the order does not account for."
+      },
+      "teardown": [
+        "reset_session"
+      ]
+    },
+    {
+      "id": "ORDERING_CONSISTENCY",
+      "name": "Ordering Consistency Invariant",
+      "description": "When a collection is sorted ascending, the sorted column must not decrease between consecutive rows. Rows may be complete and correctly filtered and still be in the wrong order.",
+      "applies_to": [
+        "sort_collection"
+      ],
+      "requirements": [
+        "goal_reachable",
+        "goal_differs_from_setup"
+      ],
+      "bindings": [
+        "row_values"
+      ],
+      "procedure": [
+        "walk_setup",
+        "walk_goal",
+        "observe_bindings"
+      ],
+      "precondition": "goal_reached == true",
+      "expected_relation": "sorted_asc(row_values) == true",
+      "on_violation": {
+        "severity": "medium",
+        "summary": "The requested sort order does not hold across consecutive rows."
+      },
+      "teardown": [
+        "reset_session"
+      ]
+    },
+    {
+      "id": "DELETION_COMPLETENESS",
+      "name": "Deletion Completeness Invariant",
+      "description": "A deleted resource must stop being served at its own URL, not merely disappear from the collection. This is the canonical goal condition about something NOT existing, and no amount of looking at the page you land on afterwards will reveal a soft delete.",
+      "applies_to": [
+        "delete_resource"
+      ],
+      "requirements": [
+        "goal_reachable",
+        "goal_differs_from_setup",
+        "probe_declared"
+      ],
+      "bindings": [],
+      "procedure": [
+        "walk_setup",
+        "capture_probe_url",
+        "walk_goal",
+        "probe"
+      ],
+      "precondition": "goal_reached == true",
+      "expected_relation": "probe_reachable == false",
+      "on_violation": {
+        "severity": "high",
+        "summary": "The resource is still served at its own URL after being deleted; the deletion removed the row from the collection without removing the resource."
+      },
+      "teardown": [
+        "reset_session"
+      ]
+    },
+    {
+      "id": "COLLECTION_COUNT_AGREEMENT",
+      "name": "Collection Count Agreement Invariant",
+      "description": "A collection's stated count must match the number of rows it displays. A page disagreeing with itself is evidence that something was hidden rather than removed.",
+      "applies_to": [
+        "delete_resource",
+        "filter_collection"
+      ],
+      "requirements": [
+        "goal_reachable",
+        "goal_differs_from_setup"
+      ],
+      "bindings": [
+        "row_count",
+        "stated_count"
+      ],
+      "procedure": [
+        "walk_setup",
+        "walk_goal",
+        "observe_bindings"
+      ],
+      "precondition": "goal_reached == true",
+      "expected_relation": "row_count == stated_count",
+      "on_violation": {
+        "severity": "medium",
+        "summary": "The collection's stated count does not match the rows it displays."
+      },
+      "teardown": [
+        "reset_session"
+      ]
+    },
+    {
+      "id": "SESSION_TERMINATION",
+      "name": "Session Termination Invariant",
+      "description": "After signing out, a protected resource must stop being reachable. The sign-out path can succeed at every observable step and still leave the session intact, which is only detectable by going back and asking for the protected page.",
+      "applies_to": [
+        "session_termination"
+      ],
+      "requirements": [
+        "goal_reachable",
+        "goal_differs_from_setup",
+        "probe_declared"
+      ],
+      "bindings": [],
+      "procedure": [
+        "walk_setup",
+        "walk_goal",
+        "probe"
+      ],
+      "precondition": "goal_reached == true",
+      "expected_relation": "probe_reachable == false",
+      "on_violation": {
+        "severity": "high",
+        "summary": "A protected resource is still reachable after signing out; the sign-out confirmed but never cleared the session."
+      },
+      "teardown": [
+        "reset_session"
+      ]
+    },
+    {
+      "id": "CREATION_VISIBILITY",
+      "name": "Creation Visibility Invariant",
+      "description": "A created resource must be reachable at its own URL, not merely rendered once in the response that created it.",
+      "applies_to": [
+        "create_resource"
+      ],
+      "requirements": [
+        "goal_reachable",
+        "goal_differs_from_setup",
+        "probe_declared"
+      ],
+      "bindings": [],
+      "procedure": [
+        "walk_setup",
+        "walk_goal",
+        "probe"
+      ],
+      "precondition": "goal_reached == true",
+      "expected_relation": "probe_reachable == true",
+      "on_violation": {
+        "severity": "high",
+        "summary": "The created resource is not reachable at its own URL; the creation rendered a result it did not store."
+      },
+      "teardown": [
+        "reset_session"
+      ]
+    }
+  ]
+}

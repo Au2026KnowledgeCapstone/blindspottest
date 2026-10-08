@@ -1,0 +1,71 @@
+{
+  "candidates": [
+    {
+      "capability": "multi_step_transaction",
+      "setup_state_id": "s_0ae984c183",
+      "goal_state_id": "s_f8ffb0b68a",
+      "bindings": [
+        {
+          "name": "line_totals",
+          "selector": "table.totals tbody tr:not(.grand) td:nth-child(2)",
+          "extract": "numbers"
+        },
+        {
+          "name": "order_total",
+          "selector": "table.totals tbody tr.grand td:nth-child(2)",
+          "extract": "number"
+        }
+      ],
+      "probe": null,
+      "applicability_confidence": 0.95,
+      "reasoning_summary": "The cart leads through contact, upsell, shipping and payment to a confirmation that renders a totals table whose last row is marked as the grand total."
+    },
+    {
+      "capability": "delete_resource",
+      "setup_state_id": "s_2ad6e6a9a6",
+      "goal_state_id": "s_db8dee12f3",
+      "bindings": [
+        {
+          "name": "row_count",
+          "selector": "table tbody tr",
+          "extract": "count"
+        },
+        {
+          "name": "stated_count",
+          "selector": ".card p",
+          "extract": "number"
+        }
+      ],
+      "probe": {
+        "mode": "captured",
+        "path": ""
+      },
+      "applicability_confidence": 0.93,
+      "reasoning_summary": "The project detail state offers a Delete project submit that returns to the collection, and the collection states a count above a table of rows."
+    },
+    {
+      "capability": "session_termination",
+      "setup_state_id": "s_d63327b72a",
+      "goal_state_id": "s_d9082d95af",
+      "bindings": [],
+      "probe": {
+        "mode": "path",
+        "path": "/account"
+      },
+      "applicability_confidence": 0.9,
+      "reasoning_summary": "The account state is reached by submitting credentials and offers a Sign out that returns to the sign-in state, so /account is the protected resource."
+    },
+    {
+      "capability": "create_resource",
+      "setup_state_id": "s_d08b988d1d",
+      "goal_state_id": "s_2ad6e6a9a6",
+      "bindings": [],
+      "probe": {
+        "mode": "final",
+        "path": ""
+      },
+      "applicability_confidence": 0.88,
+      "reasoning_summary": "The new-project state holds a name field and a Create project submit that lands on a project detail route with its own id."
+    }
+  ]
+}

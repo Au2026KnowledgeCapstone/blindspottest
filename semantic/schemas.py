@@ -148,11 +148,21 @@ def _strip_unsupported(node: Any) -> Any:
     return node
 
 
-def candidate_set_schema() -> dict:
-    """JSON Schema for `CandidateSet`, safe for strict structured outputs.
+def strict_schema(model: type[BaseModel]) -> dict:
+    """JSON Schema for a Pydantic model, safe for strict structured outputs.
 
-    Constraints like `confidence`'s 0-1 bound are removed here and enforced
-    when the response is parsed instead, so an out-of-range value becomes a
-    validation error rather than a schema-compilation error.
+    Constraints like a 0-1 bound are removed here and enforced when the
+    response is parsed instead, so an out-of-range value becomes a validation
+    error rather than a schema-compilation error.
+
+    Shared by every layer that asks a model for structured output — page
+    candidates, flow candidates, regression interpretations — because the set
+    of keywords providers reject is a property of the providers, not of any
+    one schema.
     """
-    return _strip_unsupported(CandidateSet.model_json_schema())
+    return _strip_unsupported(model.model_json_schema())
+
+
+def candidate_set_schema() -> dict:
+    """JSON Schema for `CandidateSet`, safe for strict structured outputs."""
+    return strict_schema(CandidateSet)

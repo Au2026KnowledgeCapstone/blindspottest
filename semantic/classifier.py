@@ -378,11 +378,26 @@ def load_dotenv(path: str | os.PathLike = ".env") -> None:
             os.environ[key] = value
 
 
-def backend_for(provider: str | None = None, model: str | None = None) -> LLMBackend:
-    """Build a backend explicitly, falling back to the environment per field."""
+def backend_for(
+    provider: str | None = None,
+    model: str | None = None,
+    *,
+    default_provider: str | None = None,
+) -> LLMBackend:
+    """Build a backend explicitly, falling back to the environment per field.
+
+    `default_provider` lets a caller choose what to use when neither an
+    explicit provider nor the environment supplies one. The flow and
+    regression layers pass "openai"; the page-level classifier keeps
+    Anthropic, so adding those layers does not silently change what the
+    existing pipeline calls.
+    """
     load_dotenv()
     provider = (
-        provider or os.environ.get("BLINDSPOT_LLM_PROVIDER", DEFAULT_PROVIDER)
+        provider
+        or os.environ.get("BLINDSPOT_LLM_PROVIDER")
+        or default_provider
+        or DEFAULT_PROVIDER
     ).lower()
     model = model or os.environ.get("BLINDSPOT_LLM_MODEL") or None
 
