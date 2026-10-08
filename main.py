@@ -154,7 +154,27 @@ def parse_args(argv=None):
     crawl.add_argument("--stay-under", default="", metavar="PREFIX",
                        help="confine the crawl to this route subtree")
     crawl.add_argument("--safe", action="store_true",
-                       help="skip affordances whose text looks destructive")
+                       help="skip affordances whose text looks destructive "
+                            "(a text match on an English word list — a "
+                            "seatbelt, not a safety net)")
+    crawl.add_argument("--read-only", action="store_true",
+                       help="follow links only: never fire a button, submit a "
+                            "form, or type into a field. Cannot sign in and "
+                            "cannot run flow tests, and the map will be "
+                            "incomplete and will say so")
+    crawl.add_argument("--credential", action="append", default=[],
+                       metavar="LABEL=VALUE",
+                       help="value to type into fields whose label contains "
+                            "LABEL, e.g. --credential password=hunter2 "
+                            "(repeatable). No credentials are used unless given")
+    crawl.add_argument("--settle", type=int, default=0, metavar="MS",
+                       help="wait this long after each transition; also "
+                            "throttles the crawl, which a real host may need")
+    crawl.add_argument("--allow-writes", action="store_true",
+                       help="permit a writing crawl against a non-local host. "
+                            "Required because a crawl fires every button it "
+                            "finds, which on a real site means real deletions "
+                            "and real submissions")
 
     scope = p.add_argument_group("what to test")
     scope.add_argument("--no-flows", action="store_true",
@@ -198,7 +218,59 @@ def parse_args(argv=None):
     args = p.parse_args(argv)
     if args.baseline and args.regression:
         p.error("--baseline and --regression are different modes; pick one")
+
+    args.credentials = _parse_credentials(args.credential, p.error)
+
+    # A crawl fires every button it finds. Against localhost that is a demo
+    # resetting itself; against a real host it is real deletions, real form
+    # submissions, and real outbound email. The gate is deliberately a refusal
+    # rather than a warning, because a warning scrolls past and the damage
+    # does not undo.
+    if (args.baseline or args.regression) and not args.read_only:
+        if not _is_local(args.url) and not args.allow_writes:
+            p.error(
+                f"{_host(args.url)!r} is not a local host, and a writing crawl "
+                f"fires every button it finds — including deletions and form "
+                f"submissions.\n"
+                f"  Map it without writing:  --read-only\n"
+                f"  Or accept the writes:    --allow-writes"
+            )
     return args
+
+
+def _parse_credentials(pairs, fail) -> dict[str, str]:
+    """`LABEL=VALUE` pairs into the form `CrawlConfig.credentials` wants.
+
+    Keyed by a lowercased substring of a field's label, because that is how
+    the crawler matches a value to a field — `password=hunter2` fills
+    anything labelled "Password" or "Confirm password".
+    """
+    out: dict[str, str] = {}
+    for pair in pairs or []:
+        if "=" not in pair:
+            fail(f"--credential expects LABEL=VALUE, got {pair!r}")
+        label, _, value = pair.partition("=")
+        out[label.strip().lower()] = value
+    return out
+
+
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", "[::1]"})
+
+
+def _host(url: str) -> str:
+    from urllib.parse import urlsplit
+
+    return (urlsplit(url).hostname or "").lower()
+
+
+def _is_local(url: str) -> bool:
+    """Whether a URL points at this machine.
+
+    Only loopback counts. A private-range address is somebody's staging box
+    and quite possibly somebody's production box, and guessing wrong in that
+    direction writes to it.
+    """
+    return _host(url) in _LOCAL_HOSTS
 
 
 # --------------------------------------------------------------------------
@@ -247,7 +319,11 @@ def _crawl(page, base_url: str, args, console) -> tuple[AppGraph, dict[str, dict
             exclude_prefixes=tuple(args.exclude),
             stay_under=args.stay_under,
             timeout_ms=args.timeout,
-            credentials={"username": "demo", "password": "demo123"},
+            settle_ms=args.settle,
+            read_only=args.read_only,
+            # Empty unless `--credential` was given. A default of demo/demo123
+            # meant pointing this at a real login form typed those into it.
+            credentials=args.credentials,
             on_state=observe,
             # The crawler narrates every affordance it fires and where it
             # landed. `discovery.crawler`'s own CLI prints that by default,
@@ -449,7 +525,13 @@ def run_baseline(args) -> int:
             page = browser.new_page()
             graph, readables = _crawl(page, base_url, args, console)
 
-            if not args.no_flows:
+            # A flow test walks a path and fires its actions, so there is no
+            # read-only version of one. Saying so beats running zero tests and
+            # letting the empty summary imply the application has no flows.
+            if args.read_only and not args.no_flows:
+                console.read_only_note()
+
+            if not args.no_flows and not args.read_only:
                 candidates, rejected, model_name = _flow_candidates(
                     graph, readables, args, console
                 )

@@ -210,6 +210,16 @@ class ConsoleReporter:
         self._p(f"Reading the value surface of {count} state(s)...")
         self._p()
 
+    def read_only_note(self) -> None:
+        self._p(self.s.amber("Read-only crawl — no flow tests were run."))
+        self._p(self.s.dim(
+            "  A flow test walks a path and fires its actions, so there is no\n"
+            "  read-only version of one. The graph and value surface above are\n"
+            "  what a GET-only crawl can see; everything behind a button is\n"
+            "  recorded as unexplored."
+        ))
+        self._p()
+
     def flow_classified(self, result) -> None:
         n = len(result.candidates)
         self._p(f"  {n} capability candidate{'' if n == 1 else 's'} identified.")

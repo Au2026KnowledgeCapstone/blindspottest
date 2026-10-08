@@ -106,6 +106,12 @@ blindspot --baseline <url>                        # record a baseline of a whole
 blindspot --regression --baseline-dir <dir> <url> # replay it against a later build
 ```
 
+Against a real site, start with `--read-only`: it follows links and fires
+nothing, so it cannot write whatever the buttons are called. A writing crawl
+against a non-loopback host is refused unless `--allow-writes` is passed,
+because a crawl fires every button it finds. `make remote-map TARGET=...`
+wraps the safe form; `make help` has the rest.
+
 ### Pipeline 1 — record a baseline
 
 ```bash

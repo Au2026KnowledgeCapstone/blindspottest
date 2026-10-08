@@ -6,9 +6,13 @@ BASE := http://127.0.0.1:$(PORT)
 .DEFAULT_GOAL := help
 .PHONY: help install demo scan edit run dash rules inspect truth values clean \
         crawl crawl-broken crawl-stable view draw graph graph-diff \
-        baseline baseline-cached regression regression-clean
+        baseline baseline-cached regression regression-clean \
+        remote-map remote-draw remote-view remote-baseline remote-regression
 
 GRAPHS   := runs/graphs
+# The demo app's own login. These used to be hardcoded inside the crawler,
+# which meant pointing it at any real login form typed them into it.
+DEMO_CREDS := --credential username=demo --credential password=demo123
 BASELINE := runs/baseline-sound
 
 # Real escape bytes, resolved once. `echo "\033[1m"` only renders under a
@@ -65,38 +69,62 @@ endef
 help:  ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "} \
 		/^##@ / { printf "\n\033[1m%s\033[0m\n", substr($$0, 5); next } \
-		/^[a-z][a-z-]*:.*?## / { printf "  \033[36m%-17s\033[0m %s\n", $$1, $$2 }' \
+		/^[a-z][a-z-]*:.*?## / { printf "  \033[36m%-19s\033[0m %s\n", $$1, $$2 }' \
 		$(MAKEFILE_LIST)
 	@echo
+	@echo "$(BOLD)Start here$(OFF)"
+	@echo "  make demo        scan one page — the original persistence check"
+	@echo "  make baseline    map the demo app and record a flow baseline"
+	@echo "  make regression  replay it against the broken build"
+	@echo
 	@echo "$(BOLD)Variables$(OFF)   (flags must arrive as VAR=value — make eats a bare --flag)"
-	@echo "  HEADED=1             show the browser instead of running headless"
-	@echo "  SLOW=400             pause 400ms before each action (300-500 reads well)"
-	@echo "  V=1                  print the crawler's trace of every click"
-	@echo "  URL=/broken/profile  a path relative to the demo app, or a full URL"
-	@echo "  VIEW=mermaid         for 'make view': summary | mermaid | json"
-	@echo "  OPEN=1               for 'make run': open a browser as well"
-	@echo "  PORT=3000            port the demo app is served on"
+	@echo "  HEADED=1               show the browser instead of running headless"
+	@echo "  SLOW=400               pause 400ms before each action (300-500 reads well)"
+	@echo "  V=1                    print the crawler's trace of every click"
+	@echo "  URL=/broken/profile    a path relative to the demo app, or a full URL"
+	@echo "  VIEW=mermaid           for view / remote-view: summary | mermaid | json"
+	@echo "  OPEN=1                 for 'make run': open a browser as well"
+	@echo "  PORT=3000              port the demo app is served on"
+	@echo "  TARGET=https://you.com the real site, for the remote-* targets"
+	@echo "  CREDS='--credential email=me@you.com --credential password=hunter2'"
+	@echo "  SETTLE=500             throttle a remote crawl, ms (default 250)"
+	@echo "  ALLOW=1                acknowledge that a remote run will WRITE"
 	@echo "  ARGS='--max-states 8'  anything else, passed straight through"
 	@echo
 	@echo "$(BOLD)Watching the crawler$(OFF)"
 	@echo "  It runs in crawl / crawl-broken / crawl-stable / graph / baseline /"
-	@echo "  regression — NOT in demo or scan, which load a single page."
+	@echo "  regression / remote-* — NOT in demo or scan, which load one page."
 	@echo "    make crawl HEADED=1 SLOW=400        watch every click"
 	@echo "    make crawl                          trace is on by default"
 	@echo "    make baseline HEADED=1 SLOW=300 V=1 trace and watch"
 	@echo
 	@echo "$(BOLD)Other ARGS worth knowing$(OFF)"
+	@echo "  --read-only          follow links only; never fire a button or submit"
+	@echo "  --credential L=V     type V into fields labelled L (repeatable)"
+	@echo "  --settle 250         wait after each transition; throttles the crawl"
+	@echo "  --allow-writes       permit a writing crawl against a non-local host"
 	@echo "  --max-states 10      cap the crawl; handy for a quick look"
 	@echo "  --safe               skip controls whose text looks destructive"
 	@echo "  --no-interpret       skip the LLM reading of a regression diff"
 	@echo "  --flow-candidates F  reuse cached capabilities instead of the LLM"
 	@echo
-	@echo "$(BOLD)Start here$(OFF)"
-	@echo "  make demo        scan one page — the original persistence check"
-	@echo "  make baseline    map the app and record a flow baseline"
-	@echo "  make regression  replay it against the broken build"
+	@echo "$(BOLD)A real site you own$(OFF)"
+	@echo "  Start read-only. It issues GETs and nothing else, so it cannot write"
+	@echo "  whatever the buttons are called:"
+	@echo "    make remote-map TARGET=https://you.com"
+	@echo "    make remote-draw                     open the map it built"
+	@echo "  Read-only cannot sign in (a login is a submit), runs no flow tests,"
+	@echo "  and leaves the graph OPEN — every unfired button is listed as"
+	@echo "  unexplored, so a partial map is never mistaken for a complete one."
 	@echo
-	@echo "  Every target starts and stops the demo app for you."
+	@echo "  A writing run fires EVERY button: real deletions, real submissions,"
+	@echo "  real outbound email. It also types placeholder text into the forms"
+	@echo "  it submits. Only against something you can restore:"
+	@echo "    make remote-baseline TARGET=https://you.com ALLOW=1 CREDS='...'"
+	@echo "    make remote-regression TARGET=https://you.com ALLOW=1"
+	@echo
+	@echo "  The demo targets start and stop the demo app for you."
+	@echo "  The remote-* targets never do — they only touch TARGET."
 
 install:  ## Create the venv and install dependencies
 	python3 -m venv .venv
@@ -147,15 +175,18 @@ truth:  ## Print what each demo flow is and where its defect is (no browser)
 ##@ Discovery — map the whole application
 crawl:  ## Map the sound build -> runs/graphs/graph_sound.json
 	$(call with_app, $(PY) -u -m discovery.crawler $(BASE) \
-	  --exclude /broken --out $(GRAPHS)/graph_sound.json $(ARGS) $(CRAWL_WATCH))
+	  --exclude /broken $(DEMO_CREDS) \
+	  --out $(GRAPHS)/graph_sound.json $(ARGS) $(CRAWL_WATCH))
 
 crawl-broken:  ## Map the broken build -> runs/graphs/graph_broken.json
 	$(call with_app, $(PY) -u -m discovery.crawler $(BASE) --entry /broken \
-	  --stay-under /broken --out $(GRAPHS)/graph_broken.json $(ARGS) $(CRAWL_WATCH))
+	  --stay-under /broken $(DEMO_CREDS) \
+	  --out $(GRAPHS)/graph_broken.json $(ARGS) $(CRAWL_WATCH))
 
 crawl-stable:  ## Crawl twice and diff — proves state identity does not drift
 	$(call with_app, $(PY) -u -m discovery.crawler $(BASE) \
-	  --exclude /broken --repeat 2 --out $(GRAPHS)/graph_sound.json $(ARGS) $(CRAWL_WATCH))
+	  --exclude /broken --repeat 2 $(DEMO_CREDS) \
+	  --out $(GRAPHS)/graph_sound.json $(ARGS) $(CRAWL_WATCH))
 
 view:  ## Print a graph view: make view VIEW=summary|mermaid|json
 	@test -f $(GRAPHS)/graph_sound.json \
@@ -189,27 +220,83 @@ graph-diff:  ## Compare the sound and broken graphs (needs both crawls)
 ##@ Baseline and regression — record a build, replay it against the next
 baseline:  ## Record a baseline of the sound build (crawl + flows, uses the LLM)
 	$(call with_app, $(PY) -u main.py --baseline --exclude /broken \
-	  --baseline-dir $(BASELINE) \
+	  --baseline-dir $(BASELINE) $(DEMO_CREDS) \
 	  --save-flow-candidates runs/flow-candidates.json $(BASE) $(ARGS) $(WATCH))
 
 baseline-cached:  ## Re-record the baseline reusing saved flow candidates (no LLM)
 	@test -f runs/flow-candidates.json \
 	  || { echo "no cached candidates — run 'make baseline' first"; exit 2; }
 	$(call with_app, $(PY) -u main.py --baseline --exclude /broken \
-	  --baseline-dir $(BASELINE) \
+	  --baseline-dir $(BASELINE) $(DEMO_CREDS) \
 	  --flow-candidates runs/flow-candidates.json $(BASE) $(ARGS) $(WATCH))
 
 regression:  ## Replay the baseline against the broken build — expect regressions
 	@test -d $(BASELINE) \
 	  || { echo "no baseline yet — run 'make baseline' first"; exit 2; }
 	$(call with_app, $(PY) -u main.py --regression \
-	  --baseline-dir $(BASELINE) $(BASE)/broken $(ARGS) $(WATCH))
+	  --baseline-dir $(BASELINE) $(DEMO_CREDS) $(BASE)/broken $(ARGS) $(WATCH))
 
 regression-clean:  ## Replay the baseline against the sound build — expect nothing
 	@test -d $(BASELINE) \
 	  || { echo "no baseline yet — run 'make baseline' first"; exit 2; }
 	$(call with_app, $(PY) -u main.py --regression \
-	  --baseline-dir $(BASELINE) --exclude /broken $(BASE) $(ARGS) $(WATCH))
+	  --baseline-dir $(BASELINE) $(DEMO_CREDS) --exclude /broken $(BASE) $(ARGS) $(WATCH))
+
+# --------------------------------------------------------------------------
+# A real site you own
+#
+# These deliberately do NOT go through `with_app`: that helper boots a local
+# demo app whenever :$(PORT) is quiet, which is exactly wrong when the target
+# is somewhere else.
+#
+# `remote-map` is read-only — it issues GETs and nothing else, so it cannot
+# write to the target whatever the buttons are called. `remote-baseline` can
+# write, and main.py refuses to run it against a non-local host until
+# --allow-writes is passed, because a crawl fires every button it finds.
+#
+# CREDS= passes credentials, e.g.
+#   make remote-map TARGET=https://you.com CREDS='--credential email=me@you.com'
+# --------------------------------------------------------------------------
+
+REMOTE_BASELINE := runs/baseline-remote
+
+##@ A real site you own
+remote-map:  ## Read-only crawl of a site you own: make remote-map TARGET=https://you.com
+	@test -n "$(TARGET)" || { echo "usage: make remote-map TARGET=https://example.com"; exit 2; }
+	$(PY) -u main.py --baseline --read-only --settle $(or $(SETTLE),250) \
+	  --baseline-dir $(REMOTE_BASELINE) $(CREDS) $(TARGET) $(ARGS) $(WATCH)
+
+remote-draw:  ## Draw the graph remote-map produced and open it
+	@test -f $(REMOTE_BASELINE)/graph.json \
+	  || { echo "no remote graph yet — run 'make remote-map TARGET=...' first"; exit 2; }
+	@$(PY) -m discovery.projections $(REMOTE_BASELINE)/graph.json \
+	  --view html --out $(REMOTE_BASELINE)/graph.html
+	@$(PY) -c "import webbrowser,pathlib; \
+	  p=pathlib.Path('$(REMOTE_BASELINE)/graph.html').resolve(); \
+	  print('opening', p); webbrowser.open(p.as_uri())"
+
+remote-view:  ## Print the remote map: make remote-view [VIEW=summary|mermaid|json]
+	@test -f $(REMOTE_BASELINE)/graph.json \
+	  || { echo "no remote graph yet — run 'make remote-map TARGET=...' first"; exit 2; }
+	@$(PY) -m discovery.projections $(REMOTE_BASELINE)/graph.json \
+	  --view $(or $(VIEW),summary)
+
+remote-baseline:  ## WRITES to the target. Full crawl + flow tests: make remote-baseline TARGET=... ALLOW=1
+	@test -n "$(TARGET)" || { echo "usage: make remote-baseline TARGET=https://example.com ALLOW=1"; exit 2; }
+	@test -n "$(ALLOW)" || { \
+	  echo "This fires every button on $(TARGET) — deletions, submissions, outbound email."; \
+	  echo "Re-run with ALLOW=1 once you are sure the target is restorable."; exit 2; }
+	$(PY) -u main.py --baseline --allow-writes --safe --settle $(or $(SETTLE),250) \
+	  --baseline-dir $(REMOTE_BASELINE) $(CREDS) $(TARGET) $(ARGS) $(WATCH)
+
+remote-regression:  ## Replay the remote baseline: make remote-regression TARGET=... ALLOW=1
+	@test -n "$(TARGET)" || { echo "usage: make remote-regression TARGET=https://example.com ALLOW=1"; exit 2; }
+	@test -d $(REMOTE_BASELINE) \
+	  || { echo "no remote baseline yet — run 'make remote-baseline' first"; exit 2; }
+	@test -n "$(ALLOW)" || { \
+	  echo "Replaying writes to $(TARGET). Re-run with ALLOW=1 when ready."; exit 2; }
+	$(PY) -u main.py --regression --allow-writes --settle $(or $(SETTLE),250) \
+	  --baseline-dir $(REMOTE_BASELINE) $(CREDS) $(TARGET) $(ARGS) $(WATCH)
 
 ##@ Housekeeping
 clean:  ## Remove caches and run records

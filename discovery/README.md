@@ -221,11 +221,21 @@ Key mechanics:
   from `DEFAULT_VALUES`/`credentials`, keyed by field type and label
   substring) so the happy path gets discovered; an empty-input variant is a
   separate, explicit crawl concern, not something every submit pays for.
-- **Guards.** `same_origin_only`, `exclude_prefixes` / `stay_under` (keep the
+- **Guards.** `same_origin_only`; `exclude_prefixes` / `stay_under` (keep the
   two demo builds, `/` and `/broken`, as two separate crawls rather than one
-  merged graph), and `deny_destructive` (a text-match seatbelt on labels
-  like "delete"/"cancel subscription" — not a safety net; **never point this
-  at a real host**, it fires every button it finds).
+  merged graph); `deny_destructive` (a text-match seatbelt on labels like
+  "delete"/"cancel subscription" — not a safety net, since it matches English
+  words and misses "Archive", "Void", and anything localized); and
+  `read_only`, which is the structural version of the same intent — follow
+  links, fire nothing, so writing is impossible rather than merely
+  discouraged. A writing crawl fires every button it finds, so point it at a
+  development environment or use `read_only`.
+- **Credentials.** `CrawlConfig.credentials` maps a lowercased substring of a
+  field's label to the value to type, so `{"password": "…"}` fills anything
+  labelled "Password". Empty by default. It used to default to the demo app's
+  own `demo`/`demo123`, which meant pointing the crawler at any real login
+  form typed those into it; the demo's credentials now travel with the demo's
+  invocation instead of living in the library.
 - **Observer hook.** `CrawlConfig.on_state(page, state)` is called once per
   newly discovered state, while the browser is still on it. This exists
   because some states are only ever arrived at by POST: a checkout
@@ -378,8 +388,44 @@ make regression-clean      # replay it against the sound build — expect nothin
 make rules                 # print both rule bases, page-level and flow-level
 ```
 
+Against a real site you own:
+
+```bash
+make remote-map TARGET=https://you.com   # read-only: GETs only, cannot write
+make remote-draw                          # open the map it built
+make remote-view VIEW=summary             # or print it
+```
+
 `URL=` accepts a path relative to the demo app or a full URL; `ARGS=` is
-passed through to the underlying command.
+passed through to the underlying command. `make help` lists every variable.
+
+### Read-only crawling
+
+`--read-only` makes the crawl follow links and nothing else — no button
+fired, no form submitted, no field typed into. It is structural rather than
+a word list: `deny_destructive` matches English words and misses "Archive",
+"Void", and every label in another language, whereas a GET-only crawl cannot
+write regardless of what a control is called. Verified by counting request
+methods: 0 writes read-only, 1 POST for the same crawl with writes allowed.
+
+Three costs, each reported rather than hidden:
+
+- **The graph is never closed.** Every unfired control is recorded in
+  `unexplored`, so `is_closed()` is false and a partial map cannot be
+  mistaken for a complete one or used to claim "no path exists."
+- **It cannot sign in.** A login is a form submission, so a read-only crawl
+  sees what an anonymous visitor sees. Reaching an authenticated region
+  without writing needs a pre-authenticated browser session rather than
+  credentials.
+- **No flow tests.** A flow test fires its actions by definition.
+
+On the demo app a read-only crawl reaches 10 states against 21 for a full
+one — everything behind a button is invisible, which is the honest price.
+
+`main.py` *refuses* a writing crawl against a non-loopback host unless
+`--allow-writes` is passed. A warning would scroll past; the damage would
+not undo. Only loopback counts as local, because a private-range address is
+somebody's staging box and quite possibly somebody's production box.
 
 ## Known gaps
 

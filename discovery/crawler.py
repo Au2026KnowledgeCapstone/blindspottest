@@ -107,6 +107,25 @@ class CrawlConfig:
     # without a navigation (an autosave fetch, a client-side re-render).
     settle_ms: int = 0
     deny_destructive: bool = False
+    # Follow links and nothing else: never fire a button, never submit a form,
+    # never type into a field.
+    #
+    # This is the mode for an application you cannot restore. `deny_destructive`
+    # is a text match on an English word list and misses "Archive", "Void",
+    # "Send to all", and every label in another language — it is a seatbelt.
+    # Read-only is a different claim: the crawl issues GETs and nothing else,
+    # so it cannot write regardless of what any control is called.
+    #
+    # The cost is honest and unavoidable: everything behind a button is
+    # invisible, so the graph is NOT closed and `is_closed()` says so. Every
+    # unfired control is recorded in `unexplored`, which is exactly what stops
+    # a read-only map being mistaken for a complete one.
+    #
+    # It also cannot sign in — a login is a form submission — so a read-only
+    # crawl sees what an anonymous visitor sees. Reaching an authenticated
+    # region without writing needs a pre-authenticated browser session rather
+    # than credentials.
+    read_only: bool = False
     # Credentials to use when a password field is present. Without these an
     # authenticated region of the app is simply unreachable, and the crawl
     # will honestly report it as such rather than pretend it is not there.
@@ -239,6 +258,16 @@ class Crawler:
         if affordance is None:
             return
 
+        # Checked here as well as at enqueue time. `_enqueue` keeps buttons out
+        # of the frontier, but an edge inferred as site-wide navigation or a
+        # frontier item queued before a config change could still arrive here,
+        # and a read-only guarantee that depends on one code path holding is
+        # not a guarantee.
+        if self.config.read_only and affordance.kind != "link":
+            self._say(f"  skip (read-only, would submit): {affordance.label}")
+            self._mark_unexplored(state.id, affordance.key)
+            return
+
         if self._is_destructive(affordance):
             self._say(f"  skip (destructive): {affordance.label}")
             self._mark_unexplored(state.id, affordance.key)
@@ -338,6 +367,13 @@ class Crawler:
         """
         for key, affordance in state.affordances.items():
             if affordance.kind == "field":
+                continue
+            # Under read-only, anything that is not a link is recorded as
+            # unexplored rather than silently dropped. That is what keeps
+            # `is_closed()` false and makes the resulting map honest about
+            # being partial.
+            if self.config.read_only and affordance.kind != "link":
+                self._mark_unexplored(state.id, key)
                 continue
             if affordance.kind == "link" and not self._is_same_origin(affordance.href):
                 continue
@@ -638,7 +674,32 @@ if __name__ == "__main__":
     parser.add_argument("--slow", action="store_true",
                         help="wait for network idle after each transition "
                              "(~30x slower; needed for client-rendered apps)")
+    parser.add_argument("--read-only", action="store_true",
+                        help="follow links only — never fire a button, submit "
+                             "a form, or type into a field. The map will be "
+                             "incomplete and will say so")
+    parser.add_argument("--credential", action="append", default=[],
+                        metavar="LABEL=VALUE",
+                        help="value to type into fields whose label contains "
+                             "LABEL, e.g. --credential password=hunter2 "
+                             "(repeatable)")
+    parser.add_argument("--settle", type=int, default=0, metavar="MS",
+                        help="wait this long after each transition; also "
+                             "throttles the crawl, which a real host may need")
     args = parser.parse_args()
+
+    def parse_credentials(pairs: list[str]) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for pair in pairs:
+            if "=" not in pair:
+                parser.error(
+                    f"--credential expects LABEL=VALUE, got {pair!r}"
+                )
+            label, _, value = pair.partition("=")
+            out[label.strip().lower()] = value
+        return out
+
+    credentials = parse_credentials(args.credential)
 
     def run_once() -> tuple[AppGraph, float]:
         started = time.time()
@@ -654,7 +715,13 @@ if __name__ == "__main__":
                 exclude_prefixes=tuple(args.exclude),
                 stay_under=args.stay_under,
                 wait_until="networkidle" if args.slow else "domcontentloaded",
-                credentials={"username": "demo", "password": "demo123"},
+                settle_ms=args.settle,
+                read_only=args.read_only,
+                # No default credentials. Shipping demo/demo123 in the library
+                # meant pointing the crawler at any real login form typed those
+                # into it; the demo's own credentials belong in the demo's
+                # invocation, not in the tool.
+                credentials=credentials,
                 on_event=(lambda m: print(m, flush=True)) if args.repeat == 1 else None,
             ),
         )
