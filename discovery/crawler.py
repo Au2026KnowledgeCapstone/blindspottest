@@ -48,6 +48,7 @@ from typing import Callable
 from discovery.fingerprint import fingerprint
 from discovery.graph import Affordance, Action, AppGraph, State
 from discovery.page_inspector import inspect_with_page
+from runner.highlight import DEFAULT_DWELL_MS, caption_for, clear, highlight
 from runner.persistence_runner import locate
 
 # --------------------------------------------------------------------------
@@ -107,6 +108,14 @@ class CrawlConfig:
     # without a navigation (an autosave fetch, a client-side re-render).
     settle_ms: int = 0
     deny_destructive: bool = False
+    # Paint a box over each control for this many ms before touching it, and
+    # narrate the intent. Zero disables it entirely — no overlay is injected
+    # and no extra round-trip is paid.
+    #
+    # `--headed --slow-mo` shows the pages but not which control moved
+    # between them, which is the one thing you are watching for. Paired with
+    # a visible browser this answers it; headless it only costs time.
+    highlight_ms: int = 0
     # Follow links and nothing else: never fire a button, never submit a form,
     # never type into a field.
     #
@@ -466,15 +475,35 @@ class Crawler:
 
     # -- doing things ------------------------------------------------------
 
+    def _preview(self, locator, caption: str, kind: str) -> None:
+        """Announce what is about to be touched, on screen and in the trace."""
+        if not self.config.highlight_ms:
+            return
+        self._say(f"  about to {caption}")
+        highlight(self.page, locator, caption, kind=kind,
+                  dwell_ms=self.config.highlight_ms)
+
+    def _unpreview(self) -> None:
+        """Take the overlay down before anything inspects the page.
+
+        Not optional and not cosmetic: `_settle` is followed by a snapshot,
+        and a stray element in it would change the state's fingerprint.
+        """
+        if self.config.highlight_ms:
+            clear(self.page)
+
     def _fire(self, affordance: Affordance) -> bool:
         """Click an affordance. False when it could not be actioned at all."""
         try:
             locator = locate(self.page, affordance)
             locator.wait_for(state="visible", timeout=self.config.timeout_ms)
+            self._preview(locator, caption_for("click", affordance.label), "click")
             locator.click(timeout=self.config.timeout_ms)
         except Exception as exc:
             self._say(f"  could not click {affordance.label!r}: {type(exc).__name__}")
             return False
+        finally:
+            self._unpreview()
         self._settle()
         return True
 
@@ -512,10 +541,15 @@ class Crawler:
             locator = locate(self.page, affordance)
             if locator.count() == 0:
                 return False
+            self._preview(
+                locator, caption_for("fill", affordance.label, value), "fill"
+            )
             locator.fill(value, timeout=self.config.timeout_ms)
             return True
         except Exception:
             return False
+        finally:
+            self._unpreview()
 
     def _value_for(self, affordance: Affordance) -> str | None:
         """Pick a value for a field from its type and label."""
@@ -658,6 +692,11 @@ if __name__ == "__main__":
                         help="pause this many ms before each browser action; "
                              "pair with --headed to watch the crawl "
                              "(300-500 is readable)")
+    parser.add_argument("--highlight", nargs="?", type=int, default=0,
+                        const=DEFAULT_DWELL_MS, metavar="MS",
+                        help=f"box each control and name it before clicking, "
+                             f"for this long (default {DEFAULT_DWELL_MS}ms). "
+                             f"Implies --headed: it is there to be watched")
     parser.add_argument("--safe", action="store_true",
                         help="skip affordances whose text looks destructive")
     parser.add_argument("--exclude", action="append", default=[],
@@ -688,6 +727,11 @@ if __name__ == "__main__":
                              "throttles the crawl, which a real host may need")
     args = parser.parse_args()
 
+    # Boxing controls in a browser nobody can see is pure cost, and asking
+    # for the box is unambiguously asking to watch.
+    if args.highlight:
+        args.headed = True
+
     def parse_credentials(pairs: list[str]) -> dict[str, str]:
         out: dict[str, str] = {}
         for pair in pairs:
@@ -717,6 +761,7 @@ if __name__ == "__main__":
                 wait_until="networkidle" if args.slow else "domcontentloaded",
                 settle_ms=args.settle,
                 read_only=args.read_only,
+                highlight_ms=args.highlight,
                 # No default credentials. Shipping demo/demo123 in the library
                 # meant pointing the crawler at any real login form typed those
                 # into it; the demo's own credentials belong in the demo's

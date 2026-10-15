@@ -33,8 +33,15 @@ OFF  := $(shell printf '\033[0m')
 #
 # Two forms because the two CLIs differ: `discovery.crawler` prints its click
 # trace by default and has no -v, while main.py needs -v to switch it on.
-WATCH       := $(if $(HEADED),--headed,) $(if $(SLOW),--slow-mo $(SLOW),) $(if $(V),-v,)
-CRAWL_WATCH := $(if $(HEADED),--headed,) $(if $(SLOW),--slow-mo $(SLOW),)
+#
+# HIGHLIGHT takes either a bare 1 ("on, default dwell") or a number of
+# milliseconds, so `HIGHLIGHT=1` and `HIGHLIGHT=900` both read the way you
+# would expect. `--highlight` takes its value optionally, which is what lets
+# one variable cover both.
+HILITE      := $(if $(HIGHLIGHT),--highlight $(if $(filter 1,$(HIGHLIGHT)),,$(HIGHLIGHT)),)
+
+WATCH       := $(if $(HEADED),--headed,) $(if $(SLOW),--slow-mo $(SLOW),) $(if $(V),-v,) $(HILITE)
+CRAWL_WATCH := $(if $(HEADED),--headed,) $(if $(SLOW),--slow-mo $(SLOW),) $(HILITE)
 
 # Is something already listening on $(PORT)?
 UP := $(PY) -c "import socket,sys; sys.exit(0 if socket.socket().connect_ex(('127.0.0.1',$(PORT)))==0 else 1)"
@@ -81,6 +88,8 @@ help:  ## Show this help
 	@echo "  HEADED=1               show the browser instead of running headless"
 	@echo "  SLOW=400               pause 400ms before each action (300-500 reads well)"
 	@echo "  V=1                    print the crawler's trace of every click"
+	@echo "  HIGHLIGHT=1            box each control and name it before clicking"
+	@echo "                         (HIGHLIGHT=900 to hold the box longer)"
 	@echo "  URL=/broken/profile    a path relative to the demo app, or a full URL"
 	@echo "  VIEW=mermaid           for view / remote-view: summary | mermaid | json"
 	@echo "  OPEN=1                 for 'make run': open a browser as well"
@@ -97,6 +106,12 @@ help:  ## Show this help
 	@echo "    make crawl HEADED=1 SLOW=400        watch every click"
 	@echo "    make crawl                          trace is on by default"
 	@echo "    make baseline HEADED=1 SLOW=300 V=1 trace and watch"
+	@echo
+	@echo "  HEADED shows the pages; it does not show you WHICH control moved"
+	@echo "  between them. HIGHLIGHT draws a box round each one and names it,"
+	@echo "  a beat before it is clicked — and implies HEADED, so on its own:"
+	@echo "    make crawl HIGHLIGHT=1              see every click coming"
+	@echo "    make remote-map TARGET=... HIGHLIGHT=900"
 	@echo
 	@echo "$(BOLD)Other ARGS worth knowing$(OFF)"
 	@echo "  --read-only          follow links only; never fire a button or submit"

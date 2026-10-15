@@ -46,6 +46,7 @@ from urllib.parse import urljoin, urlsplit
 from discovery.fingerprint import fingerprint
 from discovery.page_inspector import inspect_with_page
 from knowledge.flows import FLOW_STEP_RECORDS
+from runner.highlight import caption_for, clear as clear_highlight, highlight
 from runner.persistence_runner import StepError, StepRecord, describe_locator, locate
 
 DEFAULT_TIMEOUT_MS = 10_000
@@ -219,6 +220,8 @@ class FlowStepContext:
     settle_ms: int
     states: list[dict] = field(default_factory=list)
     scratch: dict = field(default_factory=dict)
+    # Box each control for this many ms before touching it; 0 is off.
+    highlight_ms: int = 0
 
 
 # --------------------------------------------------------------------------
@@ -256,6 +259,11 @@ def _act(ctx: FlowStepContext, step) -> None:
     except Exception as exc:
         raise StepError(f"could not find {label!r}: {_brief(exc)}") from None
 
+    if ctx.highlight_ms:
+        value = str(step.value or "") if step.kind == "fill" else None
+        highlight(ctx.page, locator, caption_for(step.kind, label, value),
+                  kind=step.kind, dwell_ms=ctx.highlight_ms)
+
     try:
         if step.kind == "fill":
             locator.fill(str(step.value or ""), timeout=ctx.timeout_ms)
@@ -267,6 +275,11 @@ def _act(ctx: FlowStepContext, step) -> None:
         raise
     except Exception as exc:
         raise StepError(f"could not {step.kind} {label!r}: {_brief(exc)}") from None
+    finally:
+        # Before anything fingerprints the page — an overlay left in the DOM
+        # would be read as part of the state.
+        if ctx.highlight_ms:
+            clear_highlight(ctx.page)
 
     if step.kind == "click":
         _settle(ctx)
@@ -444,10 +457,12 @@ class FlowRunner:
         *,
         timeout_ms: int = DEFAULT_TIMEOUT_MS,
         settle_ms: int = DEFAULT_SETTLE_MS,
+        highlight_ms: int = 0,
     ):
         self.page = page
         self.timeout_ms = timeout_ms
         self.settle_ms = settle_ms
+        self.highlight_ms = highlight_ms
 
     def run(self, instance) -> FlowRunResult:
         """Execute one instance's procedure, then always run its teardown."""
@@ -461,6 +476,7 @@ class FlowRunner:
             timeout_ms=self.timeout_ms,
             settle_ms=self.settle_ms,
             states=result.states,
+            highlight_ms=self.highlight_ms,
         )
 
         try:
