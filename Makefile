@@ -13,7 +13,11 @@ GRAPHS   := runs/graphs
 # The demo app's own login. These used to be hardcoded inside the crawler,
 # which meant pointing it at any real login form typed them into it.
 DEMO_CREDS := --credential username=demo --credential password=demo123
-BASELINE := runs/baseline-sound
+# `?=`, like PORT above: baselines are immutable, so every record needs a new
+# directory and this is the knob for it. `:=` would honour `make x BASELINE=y`
+# but silently ignore an exported BASELINE, recording to the default instead —
+# and the "baseline already exists" that follows points at the wrong thing.
+BASELINE ?= runs/baseline-sound
 
 # Real escape bytes, resolved once. `echo "\033[1m"` only renders under a
 # shell whose echo interprets escapes — dash does, bash does not — and make
@@ -277,7 +281,7 @@ regression-clean:  ## Replay the baseline against the sound build — expect not
 #   make remote-map TARGET=https://you.com CREDS='--credential email=me@you.com'
 # --------------------------------------------------------------------------
 
-REMOTE_BASELINE := runs/baseline-remote
+REMOTE_BASELINE ?= runs/baseline-remote
 
 ##@ A real site you own
 remote-map:  ## Read-only crawl of a site you own: make remote-map TARGET=https://you.com
