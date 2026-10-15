@@ -23,6 +23,16 @@ recorded path from the entry. Replay is verified rather than assumed: if the
 page does not fingerprint as the state we meant to reach, the affordance is
 recorded as unexplored instead of being fired somewhere unintended.
 
+Pages that will not hold still
+------------------------------
+All of the above assumes a page has one identity. A page with an autoplaying
+carousel does not — its fingerprint changes on a timer, so it is discovered
+again as a new state every rotation, and every affordance on it is explored
+once per phantom. `discovery.stability` owns the detection and the remedy;
+this module routes every "where am I?" question through its `StateReader`
+rather than calling `fingerprint` directly, so that the crawl and the graph
+cannot end up disagreeing about which state the browser is standing in.
+
 What this module does not do
 ----------------------------
 No LLM, and no judgement about what anything means. It records that pressing
@@ -45,9 +55,10 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
 
-from discovery.fingerprint import fingerprint
+from discovery.fingerprint import Fingerprint
 from discovery.graph import Affordance, Action, AppGraph, State
 from discovery.page_inspector import inspect_with_page
+from discovery.stability import DEFAULT_GAP_MS, DEFAULT_READS, StateReader
 from runner.highlight import DEFAULT_DWELL_MS, caption_for, clear, highlight
 from runner.persistence_runner import locate
 
@@ -107,6 +118,19 @@ class CrawlConfig:
     # Extra fixed grace after each transition, for async work that completes
     # without a navigation (an autosave fetch, a client-side re-render).
     settle_ms: int = 0
+    # How many times a page is read before its identity is believed, and how
+    # long to wait between those reads. One read disables the check and
+    # restores the original behaviour.
+    #
+    # `settle_ms` waits for a page to finish arriving. This is for the page
+    # that never finishes: an autoplaying carousel changes how many copies of
+    # a link are on the page every rotation, so its fingerprint moves on a
+    # timer and the crawl mints a fresh state for each one. No wait fixes
+    # that, because there is nothing to wait for — see `discovery.stability`.
+    #
+    # Paid once per URL template, not per snapshot.
+    identity_reads: int = DEFAULT_READS
+    identity_gap_ms: int = DEFAULT_GAP_MS
     deny_destructive: bool = False
     # Paint a box over each control for this many ms before touching it, and
     # narrate the intent. Zero disables it entirely — no overlay is injected
@@ -202,6 +226,17 @@ class Crawler:
         self._observed_targets: dict[str, set[str]] = {}
         self._observed_sources: dict[str, set[str]] = {}
         self._global: dict[str, str] = {}
+        # Every state id that has been folded into another, and what it
+        # became. Chased rather than composed, so a state merged twice
+        # resolves in one pass.
+        self._rekeyed: dict[str, str] = {}
+        # Owns the answer to "what state is this?", including for pages that
+        # give a different answer each time they are asked.
+        self._reader = StateReader(
+            reads=self.config.identity_reads,
+            gap_ms=self.config.identity_gap_ms,
+            on_event=self._say,
+        )
 
     # -- logging -----------------------------------------------------------
 
@@ -251,10 +286,21 @@ class Crawler:
         for item in self._frontier:
             self._mark_unexplored(item.state_id, item.affordance_key)
 
+        self.graph.volatile = {
+            template: sorted(signatures)
+            for template, signatures in self._reader.volatile.items()
+        }
+
         self._say(
             f"done: {len(self.graph.states)} states, {len(self.graph.actions)} actions, "
             f"{'closed' if self.graph.is_closed() else 'OPEN (frontier not exhausted)'}"
         )
+        if self.graph.volatile:
+            self._say(
+                f"note: {len(self.graph.volatile)} page(s) render on a timer and have "
+                f"no stable identity of their own: "
+                f"{', '.join(sorted(self.graph.volatile))}"
+            )
         return self.graph
 
     # -- the loop ----------------------------------------------------------
@@ -304,29 +350,34 @@ class Crawler:
 
         inputs = self._fill_form(state, affordance)
 
-        before = fingerprint(inspect_with_page(self.page))
+        before = self._identify(inspect_with_page(self.page))
         if not self._fire(affordance):
             self._mark_unexplored(state.id, affordance.key)
             return
         self._actions_fired += 1
 
-        after_snapshot = self._snapshot()
+        after_snapshot, after = self._read()
+
+        # `_read` can discover that a page renders on a timer and fold the
+        # states already minted for it together, which may be where this
+        # edge started. Resolved rather than trusted, because an edge from a
+        # state that no longer exists is invisible to every later query.
+        source_id = self._live(state.id)
 
         # A link's href can be checked before clicking; a button's destination
         # cannot. If firing one left the region under test, record where it
         # went but do not explore onward from there.
         if self._is_excluded(after_snapshot.get("url")):
             self._say(f"  {affordance.label!r} -> outside region, not followed")
-            self._mark_out_of_region(state.id, affordance.key)
+            self._mark_out_of_region(source_id, affordance.key)
             return
 
-        target = self.graph.observe(after_snapshot)
+        target = self.graph.observe(after_snapshot, after)
         self._note_state(target)
-        after = fingerprint(after_snapshot)
 
         effects = self._effects(before, after)
         self.graph.connect(Action(
-            source=state.id,
+            source=source_id,
             target=target.id,
             affordance_key=affordance.key,
             label=affordance.label,
@@ -334,10 +385,10 @@ class Crawler:
             effects=effects,
         ))
 
-        arrow = "self" if target.id == state.id else target.id
+        arrow = "self" if target.id == source_id else target.id
         self._say(f"  {affordance.label!r} -> {arrow} {target.url_template}")
 
-        self._note_outcome(affordance.key, state.id, target.id)
+        self._note_outcome(affordance.key, source_id, target.id)
 
         if target.visits == 1 and item.depth + 1 <= self.config.max_depth:
             self._enqueue(target, depth=item.depth + 1)
@@ -405,7 +456,7 @@ class Crawler:
         somewhere with several affordances left to try.
         """
         try:
-            if fingerprint(inspect_with_page(self.page)).id == state.id:
+            if self._identify(inspect_with_page(self.page)).id == state.id:
                 return True
         except Exception:
             pass
@@ -418,7 +469,7 @@ class Crawler:
         self._goto(self.graph.states[self.graph.entry].example_url or self.base_url)
 
         for action in path:
-            current = fingerprint(inspect_with_page(self.page))
+            current = self._identify(inspect_with_page(self.page))
             source = self.graph.states.get(current.id)
             if source is None:
                 return False
@@ -430,7 +481,7 @@ class Crawler:
             if not self._fire(affordance):
                 return False
 
-        return fingerprint(self._snapshot()).id == state.id
+        return self._identify(self._snapshot()).id == state.id
 
     def _reset(self) -> None:
         """Return the application to its seed state.
@@ -470,8 +521,110 @@ class Crawler:
         self._settle()
         return inspect_with_page(self.page)
 
+    def _identify(self, snapshot: dict) -> Fingerprint:
+        """Where the page is, by the cheap single-read rule.
+
+        Every "am I where I think I am?" check in the crawl goes through
+        here rather than calling `fingerprint` directly, because a page
+        already known to render on a timer is identified by a reduced
+        signature and a caller using the raw rule would disagree with the
+        graph about which state it was standing in.
+        """
+        return self._reader.identify(snapshot)
+
+    def _read(self, snapshot: dict | None = None) -> tuple[dict, Fingerprint]:
+        """Read the page, paying for certainty only when it is about to matter.
+
+        The expensive multi-read check runs when this snapshot would create
+        something — the first sight of a URL template, or a second identity
+        for a template that already has a state. Those are exactly the
+        moments a timer-driven page does its damage; everywhere else the
+        single read is both correct and free.
+        """
+        if snapshot is None:
+            snapshot = self._snapshot()
+        if not self._reader.enabled:
+            return snapshot, self._identify(snapshot)
+
+        template = self._reader.template_of(snapshot)
+        known = {s.url_template for s in self.graph.states.values()}
+        print_id = self._identify(snapshot)
+        novel = template not in known or print_id.id not in self.graph.states
+        if not self._reader.should_settle(template, novel=novel):
+            return snapshot, print_id
+
+        before = self._reader.volatile.get(template)
+        snapshot, print_id = self._reader.settle(
+            lambda: inspect_with_page(self.page),
+            self.page.wait_for_timeout,
+            snapshot,
+        )
+        # Compared rather than merely tested for presence: a template already
+        # known to move can have its volatile set widened here, and that
+        # changes the identity of every state recorded for it just as much as
+        # the first discovery did.
+        if self._reader.volatile.get(template) != before:
+            self._absorb_volatility()
+            print_id = self._identify(snapshot)
+        return snapshot, print_id
+
+    def _absorb_volatility(self) -> None:
+        """Fold away states minted before the page was known to be unstable.
+
+        Learning that a page renders on a timer retrospectively invalidates
+        the identities already handed out for it. Re-deriving them collapses
+        the duplicates, and the frontier has to be dragged along: an item
+        naming a state that no longer exists is silently dropped by
+        `_explore`, which would lose the affordance without recording it as
+        unexplored — a hole in the map wearing a closure claim.
+        """
+        self.graph.volatile = {
+            template: sorted(signatures)
+            for template, signatures in self._reader.volatile.items()
+        }
+        rekeyed = self.graph.recanonicalise(self._identify)
+        if not rekeyed:
+            return
+
+        self._frontier = deque(
+            _FrontierItem(
+                rekeyed.get(item.state_id, item.state_id),
+                item.affordance_key,
+                item.depth,
+            )
+            for item in self._frontier
+        )
+        self._queued = {
+            (rekeyed.get(state_id, state_id), key)
+            for state_id, key in self._queued
+        }
+        self._observed_sources = {
+            key: {rekeyed.get(s, s) for s in sources}
+            for key, sources in self._observed_sources.items()
+        }
+        self._observed_targets = {
+            key: {rekeyed.get(t, t) for t in targets}
+            for key, targets in self._observed_targets.items()
+        }
+        self._global = {
+            key: rekeyed.get(target, target)
+            for key, target in self._global.items()
+        }
+        self._rekeyed.update(rekeyed)
+        merged = len(set(rekeyed) - set(rekeyed.values()))
+        self._say(f"  [unstable] folded {merged} duplicate state(s) back together")
+
+    def _live(self, state_id: str) -> str:
+        """Where a state id ended up, if it has since been folded away."""
+        seen: set[str] = set()
+        while state_id in self._rekeyed and state_id not in seen:
+            seen.add(state_id)
+            state_id = self._rekeyed[state_id]
+        return state_id
+
     def _observe(self) -> State:
-        return self.graph.observe(self._snapshot())
+        snapshot, print_id = self._read()
+        return self.graph.observe(snapshot, print_id)
 
     # -- doing things ------------------------------------------------------
 
@@ -532,7 +685,7 @@ class Crawler:
 
     def _fill_one(self, key: str, value: str, affordance: Affordance | None = None) -> bool:
         if affordance is None:
-            state_id = fingerprint(inspect_with_page(self.page)).id
+            state_id = self._identify(inspect_with_page(self.page)).id
             state = self.graph.states.get(state_id)
             affordance = state.affordances.get(key) if state else None
         if affordance is None:
@@ -725,6 +878,17 @@ if __name__ == "__main__":
     parser.add_argument("--settle", type=int, default=0, metavar="MS",
                         help="wait this long after each transition; also "
                              "throttles the crawl, which a real host may need")
+    parser.add_argument("--identity-reads", type=int, default=DEFAULT_READS,
+                        metavar="N",
+                        help=f"read a page N times before believing its "
+                             f"identity (default {DEFAULT_READS}; 1 disables). "
+                             f"Catches pages that render on a timer, which "
+                             f"otherwise crawl as one state per rotation")
+    parser.add_argument("--identity-gap", type=int, default=DEFAULT_GAP_MS,
+                        metavar="MS",
+                        help=f"gap between those reads (default "
+                             f"{DEFAULT_GAP_MS}). The window they span must "
+                             f"exceed the animation's period to see it move")
     args = parser.parse_args()
 
     # Boxing controls in a browser nobody can see is pure cost, and asking
@@ -762,6 +926,8 @@ if __name__ == "__main__":
                 settle_ms=args.settle,
                 read_only=args.read_only,
                 highlight_ms=args.highlight,
+                identity_reads=args.identity_reads,
+                identity_gap_ms=args.identity_gap,
                 # No default credentials. Shipping demo/demo123 in the library
                 # meant pointing the crawler at any real login form typed those
                 # into it; the demo's own credentials belong in the demo's

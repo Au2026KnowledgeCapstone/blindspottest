@@ -58,6 +58,7 @@ from discovery.crawler import CrawlConfig, Crawler
 from discovery.graph import AppGraph
 from discovery.page_inspector import inspect_with_page
 from discovery.readable import readable_with_page
+from discovery.stability import DEFAULT_GAP_MS, DEFAULT_READS
 from knowledge.engine import KnowledgeEngine, Status
 from knowledge.flows import FlowEngine
 from regression.differ import diff
@@ -168,6 +169,15 @@ def parse_args(argv=None):
                        help="value to type into fields whose label contains "
                             "LABEL, e.g. --credential password=hunter2 "
                             "(repeatable). No credentials are used unless given")
+    crawl.add_argument("--identity-reads", type=int, default=DEFAULT_READS,
+                       metavar="N",
+                       help=f"read a page N times before believing its "
+                            f"identity (default {DEFAULT_READS}; 1 disables). "
+                            f"A page that renders on a timer — a carousel — "
+                            f"otherwise crawls as one state per rotation")
+    crawl.add_argument("--identity-gap", type=int, default=DEFAULT_GAP_MS,
+                       metavar="MS",
+                       help=f"gap between those reads (default {DEFAULT_GAP_MS})")
     crawl.add_argument("--settle", type=int, default=0, metavar="MS",
                        help="wait this long after each transition; also "
                             "throttles the crawl, which a real host may need")
@@ -333,6 +343,8 @@ def _crawl(page, base_url: str, args, console) -> tuple[AppGraph, dict[str, dict
             stay_under=args.stay_under,
             timeout_ms=args.timeout,
             settle_ms=args.settle,
+            identity_reads=args.identity_reads,
+            identity_gap_ms=args.identity_gap,
             read_only=args.read_only,
             highlight_ms=args.highlight,
             # Empty unless `--credential` was given. A default of demo/demo123
