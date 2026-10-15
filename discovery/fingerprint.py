@@ -213,14 +213,40 @@ class Fingerprint:
         return "\n".join(lines)
 
 
+def element_counts(snapshot: dict) -> dict[str, int]:
+    """How many of each element signature the snapshot contains.
+
+    Exposed because the identity is a function of this mapping, and anything
+    diagnosing an unstable page needs to compare the mappings rather than the
+    hashes they collapse to.
+    """
+    counts: dict[str, int] = {}
+    for element in snapshot.get("elements", []):
+        signature = element_signature(element)
+        counts[signature] = counts.get(signature, 0) + 1
+    return counts
+
+
 def fingerprint(
-    snapshot: dict, *, keep_query_keys: bool = True, strip_prefix: str = ""
+    snapshot: dict,
+    *,
+    keep_query_keys: bool = True,
+    strip_prefix: str = "",
+    ignore: frozenset[str] = frozenset(),
 ) -> Fingerprint:
     """Reduce a `page_inspector` snapshot to a stable state identity.
 
     `strip_prefix` is passed through to `url_template`, which is what lets a
     recorded state be recognised in a deployment of the same application
     mounted at a different path.
+
+    `ignore` drops element signatures from the identity entirely — not their
+    counts, the elements. It exists for pages that will not hold still: a
+    rotating carousel changes how many copies of a product link are on the
+    page every second or so, and a count that moves on a timer is not part of
+    what the state *is*. Deciding which signatures those are is
+    `discovery.stability`'s job; this module only honours the answer, so that
+    it stays a pure function of its arguments.
     """
     template = url_template(
         snapshot.get("url", ""),
@@ -228,15 +254,14 @@ def fingerprint(
         strip_prefix=strip_prefix,
     )
 
-    counts: dict[str, int] = {}
-    for element in snapshot.get("elements", []):
-        signature = element_signature(element)
-        counts[signature] = counts.get(signature, 0) + 1
+    counts = element_counts(snapshot)
 
     # Sorted, so DOM order never affects identity. A nav rendered before or
     # after main content is the same page.
     signature = tuple(
-        f"{sig}x{_bucket(count)}" for sig, count in sorted(counts.items())
+        f"{sig}x{_bucket(count)}"
+        for sig, count in sorted(counts.items())
+        if sig not in ignore
     )
 
     digest = hashlib.sha256(

@@ -115,6 +115,16 @@ def summary(graph: AppGraph, *, include_self_loops: bool = False,
         lines += ["", f"# WARNING: {pending} affordances unexplored -- graph is not closed,",
                   "# so 'no path exists' cannot be concluded from it."]
 
+    if graph.volatile:
+        # Stated rather than buried: these pages were identified by the part
+        # of them that holds still, so they have one node here, but their
+        # content changes with nothing having happened. A difference reported
+        # against them on a later run deserves more suspicion than most.
+        lines += ["", "# NOTE: these pages render on a timer and have no stable identity",
+                  "# of their own. Identified by what does hold still:"]
+        for template, signatures in sorted(graph.volatile.items()):
+            lines.append(f"#   {template}  ({len(signatures)} signature(s) excluded)")
+
     return "\n".join(lines)
 
 

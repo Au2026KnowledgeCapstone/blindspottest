@@ -58,6 +58,7 @@ from discovery.crawler import CrawlConfig, Crawler
 from discovery.graph import AppGraph
 from discovery.page_inspector import inspect_with_page
 from discovery.readable import readable_with_page
+from discovery.stability import DEFAULT_GAP_MS, DEFAULT_READS
 from knowledge.engine import KnowledgeEngine, Status
 from knowledge.flows import FlowEngine, evaluate_instance
 from knowledge.contracts import load_contracts, apply_contract
@@ -80,6 +81,7 @@ from reporting.reporter import (
     write_record,
 )
 from runner.flow_runner import FlowRunner
+from runner.highlight import DEFAULT_DWELL_MS
 from runner.persistence_runner import PersistenceRunner
 from semantic.classifier import backend_for, classify, validate_candidates
 from semantic.flow_classifier import DEFAULT_PROVIDER as FLOW_PROVIDER
@@ -168,6 +170,15 @@ def parse_args(argv=None):
                        help="value to type into fields whose label contains "
                             "LABEL, e.g. --credential password=hunter2 "
                             "(repeatable). No credentials are used unless given")
+    crawl.add_argument("--identity-reads", type=int, default=DEFAULT_READS,
+                       metavar="N",
+                       help=f"read a page N times before believing its "
+                            f"identity (default {DEFAULT_READS}; 1 disables). "
+                            f"A page that renders on a timer — a carousel — "
+                            f"otherwise crawls as one state per rotation")
+    crawl.add_argument("--identity-gap", type=int, default=DEFAULT_GAP_MS,
+                       metavar="MS",
+                       help=f"gap between those reads (default {DEFAULT_GAP_MS})")
     crawl.add_argument("--settle", type=int, default=0, metavar="MS",
                        help="wait this long after each transition; also "
                             "throttles the crawl, which a real host may need")
@@ -212,6 +223,13 @@ def parse_args(argv=None):
                      help="pause this many ms before each browser action. "
                           "Pair with --headed to actually watch a crawl or a "
                           "flow walk; 300-500 is readable")
+    run.add_argument("--highlight", nargs="?", type=int, default=0,
+                     const=DEFAULT_DWELL_MS, metavar="MS",
+                     help="before touching anything, draw a box round it and "
+                          "name it, for this long "
+                          f"(default {DEFAULT_DWELL_MS}ms). Answers 'which "
+                          "control did it just press?', which --slow-mo on "
+                          "its own does not. Implies --headed")
     run.add_argument("-v", "--verbose", action="store_true",
                      help="print the crawler's running trace of what it "
                           "clicks and where it lands")
@@ -238,6 +256,10 @@ def parse_args(argv=None):
         args.behavior_contracts = load_contracts(args.contracts)
     except (ValueError, OSError) as exc:
         p.error(f"invalid behavior contracts: {exc}")
+    # Drawing boxes in a browser nobody can see costs a round-trip per action
+    # and shows no one anything. Asking for the box is asking to watch.
+    if args.highlight:
+        args.headed = True
 
     args.credentials = _parse_credentials(args.credential, p.error)
 
@@ -340,7 +362,10 @@ def _crawl(page, base_url: str, args, console) -> tuple[AppGraph, dict[str, dict
             stay_under=args.stay_under,
             timeout_ms=args.timeout,
             settle_ms=args.settle,
+            identity_reads=args.identity_reads,
+            identity_gap_ms=args.identity_gap,
             read_only=args.read_only,
+            highlight_ms=args.highlight,
             # Empty unless `--credential` was given. A default of demo/demo123
             # meant pointing this at a real login form typed those into it.
             credentials=args.credentials,
@@ -350,7 +375,13 @@ def _crawl(page, base_url: str, args, console) -> tuple[AppGraph, dict[str, dict
             # but a baseline run went silent for the whole crawl — which on
             # a large application is indistinguishable from a hang. Under
             # `-v` the same trace is available here.
-            on_event=console.crawl_event if args.verbose else None,
+            # `--highlight` turns it on too: the overlay announces the click
+            # in the browser, and a terminal that stays silent while it does
+            # leaves you reading two halves of the same sentence.
+            on_event=(
+                console.crawl_event
+                if (args.verbose or args.highlight) else None
+            ),
         ),
     )
     graph = crawler.crawl(args.entry)
@@ -425,7 +456,8 @@ def _run_flows(page, graph, candidates, args, console):
     by_goal = {
         (c.capability.value, c.goal_state_id): c for c in candidates
     }
-    runner = FlowRunner(page, timeout_ms=args.timeout)
+    runner = FlowRunner(page, timeout_ms=args.timeout,
+                        highlight_ms=args.highlight)
 
     entries, records, verdicts = [], [], []
     for index, instance in enumerate(instances, start=1):
@@ -512,7 +544,8 @@ def _run_pages(page, graph, args, console):
             ]
 
         by_field = {c.field_id: c for c in classification.candidates}
-        runner = PersistenceRunner(page, timeout_ms=args.timeout)
+        runner = PersistenceRunner(page, timeout_ms=args.timeout,
+                                   highlight_ms=args.highlight)
 
         for instance in instances:
             candidate = by_field[instance.target.element_id]
@@ -657,8 +690,10 @@ def run_regression(args) -> int:
             graph, readables = _crawl(page, base_url, args, console)
 
             reporter.replaying(len(replays))
-            page_runner = PersistenceRunner(page, timeout_ms=args.timeout)
-            flow_runner = FlowRunner(page, timeout_ms=args.timeout)
+            page_runner = PersistenceRunner(page, timeout_ms=args.timeout,
+                                            highlight_ms=args.highlight)
+            flow_runner = FlowRunner(page, timeout_ms=args.timeout,
+                                     highlight_ms=args.highlight)
 
             for test, instance in replays:
                 aimed = baseline_loader.retarget_instance(
@@ -816,7 +851,8 @@ def run_adhoc(args) -> int:
                 ]
 
             by_field = {c.field_id: c for c in candidates}
-            runner = PersistenceRunner(page, timeout_ms=args.timeout)
+            runner = PersistenceRunner(page, timeout_ms=args.timeout,
+                                       highlight_ms=args.highlight)
 
             entries, verdicts = [], []
             for index, instance in enumerate(instances, start=1):

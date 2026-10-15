@@ -32,7 +32,7 @@ for it again — the same reason `main.py` grew `--candidates`.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -294,17 +294,30 @@ class AppGraph:
     # counting a declared edge of the map as a hole in it would retract a
     # closed-world claim that was actually earned.
     out_of_region: dict[str, list[str]] = field(default_factory=dict)
+    # URL templates that render on a timer, and the element signatures that
+    # were seen to move on them. Those signatures are excluded from the
+    # identity of that page — see `discovery.stability`. Recorded here
+    # because it is a finding about the application, not an internal detail:
+    # a page with no stable identity is a page whose regressions are hard to
+    # trust, and a reader of the map is entitled to know which ones they are.
+    volatile: dict[str, list[str]] = field(default_factory=dict)
 
     # -- construction ------------------------------------------------------
 
-    def observe(self, snapshot: dict) -> State:
+    def observe(self, snapshot: dict, print_id: Fingerprint | None = None) -> State:
         """Record a snapshot, returning the state it belongs to.
 
         Idempotent: revisiting a state increments its visit count and leaves
         the stored representative snapshot alone, so the detail projection is
         stable across a crawl.
+
+        `print_id` lets the caller supply the identity instead of having it
+        derived here. The crawl does, because identifying a page can require
+        reading it more than once, which needs a browser — and this module
+        has no business touching one.
         """
-        print_id = fingerprint(snapshot)
+        if print_id is None:
+            print_id = fingerprint(snapshot)
         state = self.states.get(print_id.id)
 
         if state is None:
@@ -321,6 +334,79 @@ class AppGraph:
 
         state.visits += 1
         return state
+
+    def recanonicalise(self, identify) -> dict[str, str]:
+        """Re-derive every state's id and fold together any that now agree.
+
+        Called when a page has just been found to render on a timer. The
+        states already recorded for it were identified before that was known
+        — potentially several of them, one per rotation — and leaving them
+        would preserve in the map exactly the duplication the discovery was
+        made to remove.
+
+        `identify` maps a snapshot to a Fingerprint under the new rule.
+        Returns {old id: surviving id} for every state that moved, so a
+        caller holding state ids elsewhere — a frontier, a visited set — can
+        follow. The empty dict means nothing changed.
+
+        The survivor is the earliest-inserted of the states that collapse,
+        so the entry keeps its id whenever the entry is involved.
+        """
+        rekeyed: dict[str, str] = {}
+        survivors: dict[str, State] = {}
+
+        for old_id, state in self.states.items():
+            if state.snapshot is None:
+                survivors.setdefault(old_id, state)
+                continue
+            print_id = identify(state.snapshot)
+            new_id = print_id.id
+            if new_id != old_id:
+                rekeyed[old_id] = new_id
+
+            winner = survivors.get(new_id)
+            if winner is None:
+                state.id = new_id
+                # The signature is what the id was derived from, and a stale
+                # one would make the saved graph self-contradictory.
+                state.signature = print_id.signature
+                survivors[new_id] = state
+            else:
+                # A duplicate of a page already kept. Its visits are real
+                # visits to that page, and its affordances are the same
+                # affordances; the snapshot and example_url of the first are
+                # kept so projections stay stable.
+                winner.visits += state.visits
+                rekeyed[old_id] = new_id
+
+        if not rekeyed:
+            return {}
+
+        self.states = survivors
+        self.entry = rekeyed.get(self.entry, self.entry)
+
+        # Rebuilt through `connect` so edges that became identical once their
+        # endpoints merged collapse rather than appearing as parallel copies.
+        moved = [
+            replace(
+                action,
+                source=rekeyed.get(action.source, action.source),
+                target=rekeyed.get(action.target, action.target),
+            )
+            for action in self.actions
+        ]
+        self.actions = []
+        for action in moved:
+            self.connect(action)
+
+        for attribute in ("unexplored", "out_of_region"):
+            folded: dict[str, list[str]] = {}
+            for state_id, keys in getattr(self, attribute).items():
+                into = folded.setdefault(rekeyed.get(state_id, state_id), [])
+                into.extend(k for k in keys if k not in into)
+            setattr(self, attribute, folded)
+
+        return rekeyed
 
     def connect(self, action: Action) -> None:
         """Add an edge, ignoring exact duplicates."""
@@ -424,6 +510,7 @@ class AppGraph:
             "actions": [a.to_dict() for a in self.actions],
             "unexplored": {k: v for k, v in self.unexplored.items() if v},
             "out_of_region": {k: v for k, v in self.out_of_region.items() if v},
+            "volatile": {k: sorted(v) for k, v in self.volatile.items() if v},
         }
 
     def save(self, path: Path | str) -> Path:
@@ -441,6 +528,7 @@ class AppGraph:
             actions=[Action.from_dict(a) for a in data.get("actions", [])],
             unexplored=data.get("unexplored", {}),
             out_of_region=data.get("out_of_region", {}),
+            volatile=data.get("volatile", {}),
         )
 
     @classmethod

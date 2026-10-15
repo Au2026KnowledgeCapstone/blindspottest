@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from knowledge.engine import STEP_RECORDS
+from runner.highlight import caption_for, clear as clear_highlight, highlight
 
 DEFAULT_TIMEOUT_MS = 10_000
 DEFAULT_SETTLE_MS = 1_500
@@ -193,11 +194,31 @@ class StepContext:
     settle_ms: int
     # Facts worth reporting that aren't observations the rule base consumes.
     scratch: dict = field(default_factory=dict)
+    # Box each control for this many ms before touching it; 0 is off.
+    highlight_ms: int = 0
 
 
 # --------------------------------------------------------------------------
 # Step handlers — one per name in knowledge.engine.STEP_RECORDS
 # --------------------------------------------------------------------------
+
+
+def _preview(ctx: StepContext, locator, kind: str, label: str,
+             value: str | None = None) -> None:
+    """Box a control before touching it, when the run asked to be watched."""
+    if ctx.highlight_ms:
+        highlight(ctx.page, locator, caption_for(kind, label, value),
+                  kind=kind, dwell_ms=ctx.highlight_ms)
+
+
+def _unpreview(ctx: StepContext) -> None:
+    """Remove the box before the page is read again.
+
+    The invariant being tested is about what the page holds, and an injected
+    overlay is something the page now holds.
+    """
+    if ctx.highlight_ms:
+        clear_highlight(ctx.page)
 
 
 def _target(ctx: StepContext):
@@ -227,6 +248,8 @@ def _write(ctx: StepContext, value: str) -> Any:
     label = _target_label(ctx)
     try:
         locator.wait_for(state="visible", timeout=ctx.timeout_ms)
+        _preview(ctx, locator, "fill",
+                 ctx.instance.target.accessible_name or label, str(value))
         # v1 handles text inputs and textareas only, so `fill` covers every
         # supported field. Checkables and selects are rejected at
         # instantiation, not here.
@@ -236,6 +259,8 @@ def _write(ctx: StepContext, value: str) -> Any:
         locator.evaluate("el => el.blur && el.blur()")
     except Exception as exc:
         raise StepError(f"could not set {label}: {_brief(exc)}") from None
+    finally:
+        _unpreview(ctx)
     return _read_state(ctx.page, locator, label)
 
 
@@ -259,9 +284,12 @@ def _click_commit(ctx: StepContext) -> None:
     try:
         locator = locate(ctx.page, commit)
         locator.wait_for(state="visible", timeout=ctx.timeout_ms)
+        _preview(ctx, locator, "click", commit.accessible_name or label)
         locator.click(timeout=ctx.timeout_ms)
     except Exception as exc:
         raise StepError(f"could not click {label}: {_brief(exc)}") from None
+    finally:
+        _unpreview(ctx)
 
 
 def _commit(ctx: StepContext) -> None:
@@ -472,10 +500,12 @@ class PersistenceRunner:
         *,
         timeout_ms: int = DEFAULT_TIMEOUT_MS,
         settle_ms: int = DEFAULT_SETTLE_MS,
+        highlight_ms: int = 0,
     ):
         self.page = page
         self.timeout_ms = timeout_ms
         self.settle_ms = settle_ms
+        self.highlight_ms = highlight_ms
 
     def run(self, instance) -> RunResult:
         """Execute one instance's procedure, then always run its teardown."""
@@ -488,6 +518,7 @@ class PersistenceRunner:
             observations=result.observations,
             timeout_ms=self.timeout_ms,
             settle_ms=self.settle_ms,
+            highlight_ms=self.highlight_ms,
         )
 
         try:
