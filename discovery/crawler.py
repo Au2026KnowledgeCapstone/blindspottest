@@ -486,13 +486,44 @@ class Crawler:
     def _reset(self) -> None:
         """Return the application to its seed state.
 
-        The demo app keys every mutation to a session cookie, so dropping
-        cookies is a full reset with no server round-trip. An application
-        without that property needs its own hook here — a fixture reload, a
-        database snapshot — and the crawl is only as repeatable as that hook.
+        Two places a browser holds state the application put there, and both
+        have to go. Cookies cover a server-side session. `localStorage` and
+        `sessionStorage` cover a client-side one — a React app with its cart,
+        its signed-in user, and in a mocked build its entire database, none
+        of which a cookie clear touches. An application whose state lives
+        anywhere else needs its own hook here — a fixture reload, a database
+        snapshot — and the crawl is only as repeatable as that hook.
+
+        Why this matters more than it looks: an incomplete reset does not
+        fail, it drifts. `_establish` navigates to the entry, replays a
+        recorded path, and verifies where it arrived — so a cart that
+        survived the reset changes the pages along the way, the verification
+        stops matching, and affordances are written off as unexplored. The
+        crawl still finishes and still writes a graph; the graph is just no
+        longer reproducible, which makes every regression diff against it
+        noise.
         """
         try:
             self.page.context.clear_cookies()
+        except Exception:
+            pass
+        self._clear_web_storage()
+
+    def _clear_web_storage(self) -> None:
+        """Empty localStorage and sessionStorage for the current origin.
+
+        Storage is per-origin and only reachable from a page on it, so this
+        runs against wherever the browser currently is rather than through
+        the context. Failure is routine and not an error: `about:blank` has
+        no origin to clear, and a page whose origin blocks storage access
+        throws on the property itself — in both cases there is nothing
+        there to carry over.
+        """
+        try:
+            self.page.evaluate(
+                "() => { try { localStorage.clear(); } catch (e) {} "
+                "try { sessionStorage.clear(); } catch (e) {} }"
+            )
         except Exception:
             pass
 
