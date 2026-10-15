@@ -361,8 +361,22 @@ def diff(
     """Everything that moved between a baseline and a later run."""
     found = FindingSet()
     if not baseline.tests:
-        found.add(Finding(Kind.MISSING, Direction.EXECUTION, "test-suite",
-                          "Baseline contains no tests; behavioral regression coverage is empty"))
+        # A baseline recorded read-only, or with `--no-flows`, has no
+        # behavioural coverage to lose — that is a gap in what was recorded,
+        # not a check that failed to run. Pre-1.1 baselines do not say which
+        # they were, and the conservative reading of silence is that tests
+        # were expected.
+        wanted = baseline.coverage.get("behavioral", True)
+        found.add(Finding(
+            Kind.MISSING,
+            Direction.EXECUTION if wanted else Direction.COVERAGE,
+            "test-suite",
+            "Baseline contains no tests; behavioral regression coverage is empty",
+            detail="" if wanted else (
+                "the baseline was recorded without behavioral tests, so this "
+                "run can only compare structure and UI"
+            ),
+        ))
     for side, record in (("baseline", baseline), ("current", current)):
         if record.graph and not AppGraph.from_dict(record.graph).is_closed():
             found.add(Finding(Kind.STRUCTURE, Direction.COVERAGE, side,

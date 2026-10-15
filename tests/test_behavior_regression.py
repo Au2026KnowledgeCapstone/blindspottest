@@ -1,4 +1,6 @@
 import json
+import os
+import stat
 import tempfile
 import unittest
 from dataclasses import replace
@@ -12,7 +14,7 @@ from discovery.graph import AppGraph
 from knowledge.contracts import BehaviorContract, APIAssertion, suggestions
 from knowledge.flows import FlowTestInstance, PathStep, BindingSpec, evaluate_instance
 from regression.differ import diff
-from regression.findings import Direction
+from regression.findings import Direction, Finding, FindingSet, Kind, _DIRECTION_RANK
 from reporting.regression_report import exit_code, build_regression_record
 
 
@@ -116,6 +118,49 @@ class RegressionTests(unittest.TestCase):
             moved = retarget_instance(FlowTestInstance.from_dict(restored.tests[0].instance), "http://localhost", "http://localhost/broken")
             self.assertEqual(moved.contract, original.tests[0].instance["contract"])
             self.assertEqual(moved.goal, instance().goal)
+
+    def test_every_direction_ranks_distinctly_below_a_regression(self):
+        ranks = [_DIRECTION_RANK[d] for d in Direction]
+        self.assertEqual(len(set(ranks)), len(ranks), "shared ranks let the tiebreakers order the report")
+        self.assertEqual(min(ranks), _DIRECTION_RANK[Direction.REGRESSED])
+        # Subjects are named so that ordering by subject — the last
+        # tiebreaker — would invert this if the directions tied.
+        found = FindingSet()
+        for direction, subject in ((Direction.FIXED, "a-fixed"),
+                                   (Direction.CHANGED, "b-changed"),
+                                   (Direction.SUSPECTED, "y-suspected"),
+                                   (Direction.REGRESSED, "z-regressed")):
+            found.add(Finding(Kind.VERDICT, direction, subject, direction.value))
+        self.assertEqual([f.subject for f in found.ranked()],
+                         ["z-regressed", "y-suspected", "b-changed", "a-fixed"])
+
+    def test_empty_read_only_baseline_is_a_gap_not_a_failure(self):
+        def compare_empty(coverage):
+            empty = BaselineRecord("http://localhost", "", "", tests=[], coverage=coverage)
+            return diff(empty, empty, include_structure=False, include_ui=False)
+
+        wanted = compare_empty({"behavioral": True})
+        self.assertEqual(wanted.findings[0].direction, Direction.EXECUTION)
+        self.assertEqual(exit_code(wanted), 2)
+        # A pre-1.1 baseline says nothing; silence has to read as "expected".
+        self.assertEqual(compare_empty({}).findings[0].direction, Direction.EXECUTION)
+
+        read_only = compare_empty({"behavioral": False})
+        self.assertEqual(read_only.findings[0].direction, Direction.COVERAGE)
+        self.assertEqual(exit_code(read_only), 0)
+
+    def test_published_baseline_is_as_readable_as_any_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            target = Path(root) / "v1"
+            save(BaselineRecord("http://localhost", "", "today", tests=[record("holds")]), target)
+            reference = Path(root) / "reference"
+            reference.mkdir()
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode),
+                             stat.S_IMODE(reference.stat().st_mode),
+                             "a baseline nobody but its recorder can read is not an artifact")
+            self.assertEqual([p.name for p in Path(root).iterdir() if p.name.startswith(".")], [],
+                             "staging directories must not survive a successful save")
+            self.assertTrue(os.access(target / "manifest.json", os.R_OK))
 
     def test_report_contains_execution_coverage_and_suggestions(self):
         baseline = BaselineRecord("http://localhost", "", "today", tests=[record("holds")])

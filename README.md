@@ -338,8 +338,12 @@ not pixel comparison, and currently compares one representative state per route.
 Regression exits `1` for confirmed or suspected regressions, `2` for execution
 failures when no regression was found, and `0` otherwise. Always inspect coverage:
 zero confirmed regressions is not a claim of whole-application correctness.
-An empty behavioral suite is an execution failure. Schema 1.0 baselines remain
-readable but cannot retroactively establish reviewed expectations.
+An empty behavioral suite is an execution failure where tests were wanted; a
+baseline recorded with `--read-only` or `--no-flows` never asked for them, so
+its empty suite is reported as a coverage gap and exits `0`. Schema 1.0
+baselines do not record which they were and are read as wanting tests.
+Schema 1.0 baselines remain readable but cannot retroactively establish
+reviewed expectations.
 
 Baselines are immutable directories, published together by atomic rename. Use a
 new `--baseline-dir` for every version. Promotion requires both `--save-baseline`

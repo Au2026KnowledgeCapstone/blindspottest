@@ -624,10 +624,20 @@ def run_baseline(args) -> int:
         finally:
             browser.close()
 
+    # `behavioral` records whether this run was *asked* for behavioural tests.
+    # A read-only crawl or `--no-flows` recording zero tests is the flag doing
+    # its job, not a failure, and the replay side needs to know which it was:
+    # a baseline with no tests is an execution failure when tests were meant
+    # to run and a coverage gap when they were never requested.
+    behavioral = not (args.read_only or args.no_flows)
     record = baseline_saver.build(
         graph=graph, tests=records, readables=readables, model=model_name,
-        coverage={"crawl_closed": graph.is_closed(), "skipped": [
-            {"invariant": getattr(s, "invariant_id", ""), "reasons": list(s.unmet)} for s in skipped]}
+        coverage={
+            "crawl_closed": graph.is_closed(),
+            "behavioral": behavioral,
+            "skipped": [{"invariant": getattr(s, "invariant_id", ""),
+                         "reasons": list(s.unmet)} for s in skipped],
+        },
     )
     directory = baseline_saver.save(record, args.baseline_dir)
 
@@ -646,7 +656,14 @@ def run_baseline(args) -> int:
 
     if run_record["summary"]["violations"]:
         return 1
-    if not records or any(t.status == "inconclusive" or t.error for t in records):
+    # An empty suite is an execution failure only where a suite was wanted.
+    # `--read-only` and `--no-flows` both record zero tests by construction,
+    # and failing the run they were asked for makes a mapping crawl — the
+    # first thing anyone points at a site they own — look broken when it
+    # recorded exactly what it was told to.
+    if behavioral and not records:
+        return 2
+    if any(t.status == "inconclusive" or t.error for t in records):
         return 2
     return 0
 

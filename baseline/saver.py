@@ -17,6 +17,7 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from secrets import token_hex
 from typing import Iterable
 
 from baseline.record_schema import (
@@ -99,15 +100,28 @@ def build(
 
 
 def save(record: BaselineRecord, directory: Path | str) -> Path:
-    """Write a baseline into `directory`, creating it if needed."""
-    import tempfile
+    """Write a baseline into `directory`, which must not already exist."""
     import shutil
     from baseline.record_schema import BaselineError
     directory = Path(directory)
     if directory.exists():
         raise BaselineError(f"baseline {directory} already exists; choose a new version directory")
     directory.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=".baseline-", dir=directory.parent))
+
+    # Staged under a dotted name next to the target so an interrupted save
+    # leaves something recognisably not a baseline, then renamed into place.
+    #
+    # `mkdir` rather than `mkdtemp`: the mode mkdtemp picks is 0700, and
+    # `os.rename` carries it onto the published baseline, so the baseline
+    # would be readable only by the user who recorded it. A CI job uploading
+    # it as an artifact, a container running as another UID, or a reviewer on
+    # a shared machine would all be locked out of a directory whose whole
+    # purpose is to be read later. `mkdir` applies the umask like every other
+    # file this writes. The suffix only has to beat a concurrent save; it is
+    # not a security boundary, and `mkdir` fails rather than reusing a
+    # directory if one somehow collides.
+    staging = directory.with_name(f".{directory.name}-{os.getpid()}-{token_hex(4)}")
+    staging.mkdir()
     try:
         _write_json(staging / GRAPH_FILE, record.graph)
         _write_json(staging / READABLES_FILE, record.readables)
