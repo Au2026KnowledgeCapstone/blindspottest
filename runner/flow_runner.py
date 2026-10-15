@@ -301,6 +301,11 @@ def _walk(ctx: FlowStepContext, steps, expected_state: str, phase: str) -> bool:
             ctx.scratch[f"{phase}_failed_at"] = f"step {index}/{len(steps)}: {exc}"
             return False
 
+    if phase == "goal" and ctx.instance.contract:
+        from knowledge.contracts import BehaviorContract
+        from runner.contract_checks import assert_ui
+        contract = BehaviorContract.model_validate(ctx.instance.contract)
+        assert_ui(ctx.page, contract.ready, ctx.timeout_ms)
     snapshot = inspect_with_page(ctx.page)
     print_ = fingerprint(
         snapshot, strip_prefix=getattr(ctx.instance, "route_prefix", "")
@@ -465,7 +470,23 @@ class FlowRunner:
         self.highlight_ms = highlight_ms
 
     def run(self, instance) -> FlowRunResult:
+        """Use a fresh context so cookies and origin storage cannot leak between tests."""
+        original = self.page
+        context = original.context.browser.new_context()
+        try:
+            self.page = context.new_page()
+            result = self._run(instance)
+            result.notes["isolation"] = "fresh_browser_context"
+            return result
+        finally:
+            self.page = original
+            context.close()
+
+    def _run(self, instance) -> FlowRunResult:
         """Execute one instance's procedure, then always run its teardown."""
+        from knowledge.contracts import BehaviorContract
+        from runner.contract_checks import act, assert_ui, api_outcomes
+        contract = BehaviorContract.model_validate(instance.contract) if instance.contract else None
         result = FlowRunResult(test_id=instance.test_id, instance=instance)
         started = _now()
 
@@ -485,14 +506,36 @@ class FlowRunner:
             # one's effect, and the first thing a flow invariant asserts
             # about is an effect.
             _reset_session(ctx)
+            if contract:
+                self.page.goto(instance.entry_url, timeout=self.timeout_ms, wait_until="domcontentloaded")
+                act(self.page, contract.setup, self.timeout_ms)
+                assert_ui(self.page, contract.preconditions, self.timeout_ms)
+                result.observations["fixture_ready"] = True
             self._execute(ctx, result, instance.procedure, teardown=False)
+            if contract and not result.error and result.observations.get("goal_reached"):
+                if contract.api_assertions:
+                    result.observations["api_outcome"] = api_outcomes(self.page, instance, contract, ctx.scratch)
         except Exception as exc:
             result.error = f"setup: {_brief(exc)}"
         finally:
+            if contract and contract.cleanup:
+                try:
+                    act(self.page, contract.cleanup, self.timeout_ms)
+                    self.page.reload(timeout=self.timeout_ms, wait_until="domcontentloaded")
+                    assert_ui(self.page, contract.cleanup_assertions, self.timeout_ms)
+                    ctx.scratch["cleanup_verified"] = True
+                except Exception as exc:
+                    result.error = f"cleanup: {_brief(exc)}"
+                    ctx.scratch["cleanup_verified"] = False
             if instance.teardown:
                 self._execute(ctx, result, instance.teardown, teardown=True)
                 result.reset = all(s.ok for s in result.steps if s.teardown)
 
+        if ctx.scratch.get("cleanup_verified") is False:
+            result.reset = False
+        if contract:
+            result.observations["fixture_version"] = contract.fixture_version
+            result.observations["contract_digest"] = contract.digest()
         result.notes = dict(ctx.scratch)
         result.duration_ms = int((_now() - started) * 1000)
         return result
@@ -503,6 +546,11 @@ class FlowRunner:
             handler = STEP_HANDLERS[name]
             records = FLOW_STEP_RECORDS[name]
             try:
+                if name == "observe_bindings" and ctx.instance.contract:
+                    from knowledge.contracts import BehaviorContract
+                    from runner.contract_checks import assert_ui
+                    contract = BehaviorContract.model_validate(ctx.instance.contract)
+                    assert_ui(ctx.page, contract.ready, ctx.timeout_ms)
                 value = handler(ctx)
             except Exception as exc:
                 detail = str(exc) if isinstance(exc, StepError) else _brief(exc)

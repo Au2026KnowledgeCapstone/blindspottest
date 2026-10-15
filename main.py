@@ -60,7 +60,8 @@ from discovery.page_inspector import inspect_with_page
 from discovery.readable import readable_with_page
 from discovery.stability import DEFAULT_GAP_MS, DEFAULT_READS
 from knowledge.engine import KnowledgeEngine, Status
-from knowledge.flows import FlowEngine
+from knowledge.flows import FlowEngine, evaluate_instance
+from knowledge.contracts import load_contracts, apply_contract
 from regression.differ import diff
 from regression.interpreter import interpret
 from regression.interpreter import DEFAULT_PROVIDER as INTERPRET_PROVIDER
@@ -206,6 +207,12 @@ def parse_args(argv=None):
                             "calling the LLM")
     cache.add_argument("--save-flow-candidates", type=Path,
                        help="write the flow classifier's candidates for later reuse")
+    cache.add_argument("--contracts", type=Path,
+                       help="reviewed behavior contracts keyed by flow test id (baseline only)")
+    cache.add_argument("--export-contracts", type=Path,
+                       help="write generated flow contracts for review")
+    cache.add_argument("--new-baseline-dir", type=Path,
+                       help="destination for --save-baseline; existing baselines are immutable")
     cache.add_argument("--save-baseline", action="store_true",
                        help="on a regression run, also record this build as a "
                             "new baseline")
@@ -237,6 +244,18 @@ def parse_args(argv=None):
     if args.baseline and args.regression:
         p.error("--baseline and --regression are different modes; pick one")
 
+    if args.regression and args.contracts:
+        p.error("regression uses saved contracts; record a new baseline to change expectations")
+    if args.save_baseline and not args.new_baseline_dir:
+        p.error("--save-baseline requires --new-baseline-dir")
+    if args.read_only and args.regression:
+        p.error("regression replays writing tests; --read-only is for baseline discovery only")
+    if args.read_only and args.with_pages:
+        p.error("--with-pages mutates fields and cannot be combined with --read-only")
+    try:
+        args.behavior_contracts = load_contracts(args.contracts)
+    except (ValueError, OSError) as exc:
+        p.error(f"invalid behavior contracts: {exc}")
     # Drawing boxes in a browser nobody can see costs a round-trip per action
     # and shows no one anything. Asking for the box is asking to watch.
     if args.highlight:
@@ -418,6 +437,17 @@ def _run_flows(page, graph, candidates, args, console):
     engine = FlowEngine.load()
     instances, skipped = engine.instantiate(candidates, graph)
 
+    known = {instance.test_id for instance in instances}
+    unknown = set(args.behavior_contracts) - known
+    if unknown:
+        raise ValueError(f"contracts reference unknown flow tests: {sorted(unknown)}")
+    instances = [apply_contract(i, args.behavior_contracts) for i in instances]
+    if args.export_contracts:
+        from knowledge.contracts import BehaviorContract
+        args.export_contracts.parent.mkdir(parents=True, exist_ok=True)
+        args.export_contracts.write_text(json.dumps({
+            i.test_id: BehaviorContract.model_validate(i.contract).model_dump(mode="json")
+            for i in instances}, indent=2) + "\n")
     for skip in skipped:
         console.flow_skipped(skip)
     if skipped:
@@ -437,12 +467,14 @@ def _run_flows(page, graph, candidates, args, console):
         result = runner.run(instance)
         console.flow_testing(result)
 
-        verdict = engine.evaluate(engine.get(instance.invariant), result.observations)
+        verdict = evaluate_instance(instance, result)
         console.flow_verdict(verdict, result)
 
         verdicts.append(verdict)
         entries.append(build_flow_entry(instance, candidate, result, verdict))
         records.append(baseline_saver.flow_test_record(instance, result, verdict))
+        if result.reset is False:
+            break
 
     return entries, records, verdicts, skipped
 
@@ -542,6 +574,9 @@ def _run_pages(page, graph, args, console):
 def run_baseline(args) -> int:
     from playwright.sync_api import sync_playwright
 
+    if args.baseline_dir.exists():
+        print("Baseline exists; choose a new --baseline-dir version.", file=sys.stderr)
+        return 2
     base_url = args.url.rstrip("/")
     console = ConsoleReporter()
     console.header(base_url)
@@ -578,7 +613,7 @@ def run_baseline(args) -> int:
                     verdicts += f_verdicts
                     skipped += f_skipped
 
-            if args.with_pages:
+            if args.with_pages and not any(r.evidence.get("cleanup_verified") is False for r in records):
                 p_entries, p_records, p_verdicts, p_skipped = _run_pages(
                     page, graph, args, console
                 )
@@ -589,8 +624,20 @@ def run_baseline(args) -> int:
         finally:
             browser.close()
 
+    # `behavioral` records whether this run was *asked* for behavioural tests.
+    # A read-only crawl or `--no-flows` recording zero tests is the flag doing
+    # its job, not a failure, and the replay side needs to know which it was:
+    # a baseline with no tests is an execution failure when tests were meant
+    # to run and a coverage gap when they were never requested.
+    behavioral = not (args.read_only or args.no_flows)
     record = baseline_saver.build(
-        graph=graph, tests=records, readables=readables, model=model_name
+        graph=graph, tests=records, readables=readables, model=model_name,
+        coverage={
+            "crawl_closed": graph.is_closed(),
+            "behavioral": behavioral,
+            "skipped": [{"invariant": getattr(s, "invariant_id", ""),
+                         "reasons": list(s.unmet)} for s in skipped],
+        },
     )
     directory = baseline_saver.save(record, args.baseline_dir)
 
@@ -607,7 +654,18 @@ def run_baseline(args) -> int:
     console.summary(verdicts, path)
     console.baselined(directory, baseline_saver.summarize(record))
 
-    return 1 if run_record["summary"]["violations"] else 0
+    if run_record["summary"]["violations"]:
+        return 1
+    # An empty suite is an execution failure only where a suite was wanted.
+    # `--read-only` and `--no-flows` both record zero tests by construction,
+    # and failing the run they were asked for makes a mapping crawl — the
+    # first thing anyone points at a site they own — look broken when it
+    # recorded exactly what it was told to.
+    if behavioral and not records:
+        return 2
+    if any(t.status == "inconclusive" or t.error for t in records):
+        return 2
+    return 0
 
 
 # --------------------------------------------------------------------------
@@ -620,6 +678,9 @@ def run_regression(args) -> int:
 
     base_url = args.url.rstrip("/")
     reporter = RegressionReporter()
+    if args.save_baseline and args.new_baseline_dir.exists():
+        print("New baseline destination already exists.", file=sys.stderr)
+        return 2
 
     try:
         recorded = baseline_loader.load(args.baseline_dir)
@@ -631,7 +692,6 @@ def run_regression(args) -> int:
     reporter.header(args.baseline_dir, base_url, recorded.created_at)
 
     page_engine = KnowledgeEngine.load()
-    flow_engine = FlowEngine.load()
 
     fresh_records: list = []
 
@@ -658,9 +718,7 @@ def run_regression(args) -> int:
                 )
                 if test.kind == FLOW:
                     result = flow_runner.run(aimed)
-                    verdict = flow_engine.evaluate(
-                        flow_engine.get(aimed.invariant), result.observations
-                    )
+                    verdict = evaluate_instance(aimed, result)
                     fresh_records.append(
                         baseline_saver.flow_test_record(aimed, result, verdict)
                     )
@@ -673,12 +731,16 @@ def run_regression(args) -> int:
                         baseline_saver.page_test_record(aimed, result, verdict)
                     )
                 reporter.replayed(test, verdict)
+                if getattr(result, "reset", None) is False or getattr(result, "restored", None) is False:
+                    break
         finally:
             browser.close()
 
     current = baseline_saver.build(
         graph=graph, tests=fresh_records, readables=readables,
         model=recorded.model,
+        coverage={"crawl_closed": graph.is_closed(), "expected_tests": len(replays),
+                  "executed_tests": len(fresh_records)},
     )
 
     reporter.comparing()
@@ -721,7 +783,7 @@ def run_regression(args) -> int:
 
     promoted = None
     if args.save_baseline:
-        promoted = baseline_saver.save(current, args.baseline_dir)
+        promoted = baseline_saver.save(current, args.new_baseline_dir)
 
     reporter.summary(found, path, promoted)
     return regression_exit_code(found)

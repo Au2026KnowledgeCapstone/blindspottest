@@ -13,7 +13,11 @@ GRAPHS   := runs/graphs
 # The demo app's own login. These used to be hardcoded inside the crawler,
 # which meant pointing it at any real login form typed them into it.
 DEMO_CREDS := --credential username=demo --credential password=demo123
-BASELINE := runs/baseline-sound
+# `?=`, like PORT above: baselines are immutable, so every record needs a new
+# directory and this is the knob for it. `:=` would honour `make x BASELINE=y`
+# but silently ignore an exported BASELINE, recording to the default instead —
+# and the "baseline already exists" that follows points at the wrong thing.
+BASELINE ?= runs/baseline-sound
 
 # Real escape bytes, resolved once. `echo "\033[1m"` only renders under a
 # shell whose echo interprets escapes — dash does, bash does not — and make
@@ -242,7 +246,7 @@ baseline:  ## Record a baseline of the sound build (crawl + flows, uses the LLM)
 	  --baseline-dir $(BASELINE) $(DEMO_CREDS) \
 	  --save-flow-candidates runs/flow-candidates.json $(BASE) $(ARGS) $(WATCH))
 
-baseline-cached:  ## Re-record the baseline reusing saved flow candidates (no LLM)
+baseline-cached:  ## Record with cached candidates; set BASELINE to a new directory
 	@test -f runs/flow-candidates.json \
 	  || { echo "no cached candidates — run 'make baseline' first"; exit 2; }
 	$(call with_app, $(PY) -u main.py --baseline --exclude /broken \
@@ -277,7 +281,7 @@ regression-clean:  ## Replay the baseline against the sound build — expect not
 #   make remote-map TARGET=https://you.com CREDS='--credential email=me@you.com'
 # --------------------------------------------------------------------------
 
-REMOTE_BASELINE := runs/baseline-remote
+REMOTE_BASELINE ?= runs/baseline-remote
 
 ##@ A real site you own
 remote-map:  ## Read-only crawl of a site you own: make remote-map TARGET=https://you.com
@@ -320,3 +324,7 @@ remote-regression:  ## Replay the remote baseline: make remote-regression TARGET
 ##@ Housekeeping
 clean:  ## Remove caches and run records
 	rm -rf runs __pycache__ */__pycache__
+
+.PHONY: test
+test:  ## Run deterministic behavior-contract, browser, and CLI tests (no LLM)
+	$(PY) -m unittest discover -s tests -v

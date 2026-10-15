@@ -32,6 +32,10 @@ class Direction(str, Enum):
     REGRESSED = "regressed"
     FIXED = "fixed"
     CHANGED = "changed"
+    SUSPECTED = "suspected"
+    EXECUTION = "execution_failure"
+    EXISTING = "existing_violation"
+    COVERAGE = "coverage_gap"
 
 
 class Kind(str, Enum):
@@ -92,13 +96,32 @@ class Finding:
         )
 
 
-# Severity ranking used only for ordering a report. A regression outranks
+# Ranking used only for ordering a report. A confirmed regression outranks
 # everything, because the question being asked is "did anything break".
+#
+# Every direction needs its own rank. Two directions sharing one leaves the
+# tiebreakers — severity, then kind, then the subject's name — to decide
+# between them, which is how a `fixed` finding ends up above a `suspected`
+# regression and the headline of the report becomes alphabetical.
+#
+# Below a confirmed regression the order is "how much does this need a human":
+# a suspected regression first, then the checks that could not answer, then
+# what was already broken, then neutral changes. Coverage gaps and fixes come
+# last — they are context for the run, not things to act on.
 _DIRECTION_RANK = {
     Direction.REGRESSED: 0,
-    Direction.FIXED: 1,
-    Direction.CHANGED: 2,
+    Direction.SUSPECTED: 1,
+    Direction.EXECUTION: 2,
+    Direction.EXISTING: 3,
+    Direction.CHANGED: 4,
+    Direction.COVERAGE: 5,
+    Direction.FIXED: 6,
 }
+
+# A missing rank is a wiring bug — `ranked()` indexes this directly, so a
+# direction added without one fails a run late, mid-report, on a KeyError.
+assert set(_DIRECTION_RANK) == set(Direction), "every Direction needs a rank"
+
 _SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2, None: 3}
 _KIND_RANK = {
     Kind.VERDICT: 0,
@@ -153,6 +176,8 @@ class FindingSet:
             "regressed": len(self.of_direction(Direction.REGRESSED)),
             "fixed": len(self.of_direction(Direction.FIXED)),
             "changed": len(self.of_direction(Direction.CHANGED)),
+            **{d.value: len(self.of_direction(d)) for d in (
+                Direction.SUSPECTED, Direction.EXECUTION, Direction.EXISTING, Direction.COVERAGE)},
             **{
                 kind.value: sum(1 for f in self.findings if f.kind is kind)
                 for kind in Kind

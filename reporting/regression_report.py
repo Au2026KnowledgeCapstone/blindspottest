@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from regression.findings import Direction, FindingSet, Kind
+from discovery.graph import AppGraph
 from reporting.reporter import _Style, _supports_color
 
 RUNS_DIR = Path("runs")
@@ -104,8 +105,16 @@ class RegressionReporter:
                 self._finding(finding, self.s.red)
                 self._p()
         else:
-            self._p(self.s.green("Nothing regressed."))
+            self._p(self.s.green("No confirmed behavioral regressions."))
             self._p()
+
+        for direction in (Direction.SUSPECTED, Direction.EXECUTION, Direction.EXISTING, Direction.COVERAGE):
+            items = found.of_direction(direction)
+            if items:
+                self._p(self.s.bold(f"{direction.value.upper()} ({len(items)})"))
+                for finding in items:
+                    self._finding(finding, self.s.amber)
+                self._p()
 
         fixed = found.of_direction(Direction.FIXED)
         if fixed:
@@ -172,7 +181,10 @@ class RegressionReporter:
         self._p(self.s.bold("Summary"))
         self._p(
             f"  {counts['regressed']} regressed, {counts['fixed']} fixed, "
-            f"{counts['changed']} changed"
+            f"{counts['changed']} changed, {counts['suspected']} suspected, "
+            f"{counts['execution_failure']} execution failures, "
+            f"{counts['existing_violation']} existing violations, "
+            f"{counts['coverage_gap']} coverage gaps"
         )
         if path:
             self._p(f"  Report: {path}")
@@ -191,6 +203,12 @@ class RegressionReporter:
 # --------------------------------------------------------------------------
 # Machine-readable record
 # --------------------------------------------------------------------------
+
+
+def _suggestions_for(test):
+    from knowledge.contracts import BehaviorContract, suggestions
+    data = test.instance.get("contract")
+    return suggestions(BehaviorContract.model_validate(data)) if data else []
 
 
 def build_regression_record(
@@ -220,6 +238,16 @@ def build_regression_record(
             "counts": current.manifest()["counts"],
         },
         **found.to_dict(),
+        "coverage": {
+            "baseline_tests": len(baseline.tests), "executed_tests": len(current.tests),
+            "conclusive_tests": sum(t.status != "inconclusive" and not t.error for t in current.tests),
+            "baseline_crawl_closed": AppGraph.from_dict(baseline.graph).is_closed(),
+            "current_crawl_closed": AppGraph.from_dict(current.graph).is_closed(),
+        },
+        "results": [t.to_dict() for t in current.tests],
+        "suggestions": [dict(item, test_id=t.test_id)
+                        for t in current.tests
+                        for item in _suggestions_for(t)],
         "interpretation": (
             {
                 "model": interpretation.model,
@@ -249,17 +277,16 @@ def write_regression_record(record: dict, directory: Path | str = RUNS_DIR) -> P
     """
     directory = Path(directory) / "regressions"
     directory.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%S")
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%S%f")
     path = directory / f"{stamp}.json"
     path.write_text(json.dumps(record, indent=2) + "\n")
     return path
 
 
 def exit_code(found: FindingSet) -> int:
-    """0 when nothing regressed, 1 when something did.
-
-    Neutral changes do not fail a run. A build that added a route has not
-    broken anything, and a check that fails on every difference is one that
-    gets switched off.
-    """
-    return 1 if found.regressions else 0
+    """1 for confirmed/suspected regressions, 2 for execution failures, else 0."""
+    if found.regressions or found.of_direction(Direction.SUSPECTED):
+        return 1
+    if found.of_direction(Direction.EXECUTION):
+        return 2
+    return 0

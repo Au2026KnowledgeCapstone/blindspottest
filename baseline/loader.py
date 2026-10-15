@@ -69,6 +69,7 @@ def load(directory: Path | str) -> BaselineRecord:
         graph=graph,
         readables=readables,
         tests=[TestRecord.from_dict(t) for t in tests_blob.get("tests", [])],
+        coverage=manifest.get("coverage", {}),
     )
 
 

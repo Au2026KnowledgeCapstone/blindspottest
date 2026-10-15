@@ -36,7 +36,7 @@ executable, serializable instances and turns observations into verdicts;
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -367,6 +367,7 @@ class FlowTestInstance:
     # recorded state ids could never match, because a fingerprint includes
     # the route and `/broken/cart` is not `/cart`.
     route_prefix: str = ""
+    contract: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -387,6 +388,7 @@ class FlowTestInstance:
             "expected_relation": self.expected_relation,
             "precondition": self.precondition,
             "route_prefix": self.route_prefix,
+            "contract": self.contract,
         }
 
     @classmethod
@@ -411,6 +413,7 @@ class FlowTestInstance:
             expected_relation=data["expected_relation"],
             precondition=data.get("precondition"),
             route_prefix=data.get("route_prefix", ""),
+            contract=data.get("contract", {}),
         )
 
     def describe(self) -> str:
@@ -550,6 +553,7 @@ class FlowEngine:
         test_id: str,
     ) -> FlowTestInstance:
         """Fuse one flow invariant with one candidate's concrete walk."""
+        from knowledge.contracts import inferred_contract
         setup_state = candidate.setup_state_id or graph.entry
 
         setup_actions = graph.path_to(setup_state)
@@ -597,6 +601,7 @@ class FlowEngine:
             teardown=inv.teardown,
             expected_relation=inv.expected_relation.source,
             precondition=inv.precondition.source if inv.precondition else None,
+            contract=inferred_contract(candidate, inv, setup_state),
         )
 
     def instantiate(
@@ -684,3 +689,19 @@ if __name__ == "__main__":
         if inv.precondition:
             print(f"    conditioned : {inv.precondition.source}")
         print()
+
+
+def evaluate_instance(instance, result):
+    """Evaluate the recorded expectation, never a silently updated rule file."""
+    if result.error or result.reset is False:
+        return Verdict(instance.invariant, Status.INCONCLUSIVE,
+                       result.error or "cleanup verification failed", result.observations)
+    if result.observations.get("goal_reached") is not True:
+        return Verdict(instance.invariant, Status.INCONCLUSIVE,
+                       "flow did not reach its verified goal", result.observations)
+    if result.observations.get("api_outcome") is False:
+        return Verdict(instance.invariant, Status.VIOLATED,
+                       "application outcome assertion failed", result.observations, severity="high")
+    return decide(instance.invariant, Relation.parse(instance.expected_relation),
+                  Relation.parse(instance.precondition) if instance.precondition else None,
+                  result.observations, on_violation={"severity": "high"})

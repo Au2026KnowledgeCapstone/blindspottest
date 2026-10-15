@@ -251,3 +251,107 @@ eyeballed. Nothing in the app reads it, and no page links to it.
 
 State is per browser session (a cookie) and the two builds keep separate copies,
 so two scans never collide, and `POST /reset` puts a session back to the seed.
+## Behavior contracts and evidence-based regression
+
+Flow baselines now save an explicit behavior contract inside each test instance.
+Discovery proposes the capability, observation bindings, evidence, assumptions,
+and an inferred expectation from `knowledge/capability_models.json` and the
+existing invariant rules. A capability is a hypothesis about behavior, not proof
+of the application's requirements.
+
+Export these proposals while recording an exploratory baseline:
+
+```sh
+.venv/bin/python main.py --baseline http://localhost:3000 \
+  --exclude /broken --baseline-dir runs/baselines/exploratory \
+  --save-flow-candidates runs/candidates.json \
+  --export-contracts runs/contracts.json
+```
+
+Review `runs/contracts.json`. Each key identifies a generated flow test. Confirm
+its capability, relation, selectors, assumptions, and resource semantics. For a
+confirmed contract, set `review_status` to `confirmed`, supply `reviewed_by`,
+`requirement_source`, and `fixture_version`, and define observable fixture
+`preconditions`. Confirming a contract is an assertion by the reviewer that its
+expectations and fixture checks match the application's requirements; a model
+confidence score cannot confirm it. Then record a separate reviewed baseline:
+
+```sh
+.venv/bin/python main.py --baseline http://localhost:3000 \
+  --exclude /broken --baseline-dir runs/baselines/reviewed-v1 \
+  --flow-candidates runs/candidates.json --contracts runs/contracts.json
+
+.venv/bin/python main.py --regression http://localhost:3000/broken \
+  --baseline-dir runs/baselines/reviewed-v1 --no-interpret
+```
+
+Contracts bind to generated test IDs and verify capability/invariant identity.
+IDs are currently sequential, so recheck exported contracts after rediscovery;
+contracts are not automatically transferred across changed suites. Overrides
+are baseline-only: regression uses the saved contract and saved relation rather
+than the current rule file. Ordinary fields and selectors remain fixed during
+replay. A changed path is not silently repaired.
+
+Application-specific fields include:
+
+- `setup`: ordered `click`, `fill`, `select`, or `check` actions at the entry page.
+- `preconditions`: fixture assertions after setup and before recorded navigation.
+- `ready`: outcome assertions before goal fingerprinting and observation reads.
+- `api_assertions`: same-origin, deployment-relative GET checks with bounded
+  polling, optional JSON paths, expected values, and expected HTTP statuses.
+  Redirects, server failures, invalid JSON, and invalid paths are inconclusive;
+  readable outcome mismatches are violations. Requests share the flow's cookies.
+  Omitting `expected` and `json_path` creates a status-only check.
+- `cleanup` and `cleanup_assertions`: application cleanup followed by reload and
+  verification. Non-session-scoped contracts require both. Failed cleanup stops
+  subsequent tests. Every flow uses a fresh browser context, but closing it does
+  not undo orders or other shared backend mutations; configure real cleanup.
+- `ignored_observations`: observation names mapped to reasons for ignoring
+  volatile values in comparison. These never bypass invariant evaluation.
+- `branches`: explicitly recorded branch evidence, gaps, and recommendations.
+  Unexplored branches produce `not_observed` suggestions, not defect claims.
+
+The example in `examples/behavior-contracts.json` illustrates these fields for a
+hypothetical checkout app; adapt its selectors and API to the actual target.
+Setup and cleanup support declarative UI actions, not arbitrary Python hooks.
+Fixture preconditions are assertions of known starting data, not an automatic
+fixture generator. Authentication setup must be included for isolated flows.
+
+### Reading the results
+
+| Finding direction | Meaning |
+|---|---|
+| `regressed` | A reviewed expectation held before and now fails under a matching contract, with fixture checks completed in both runs |
+| `suspected` | An inferred/legacy expectation fails, or comparable starting evidence is insufficient for confirmation |
+| `existing_violation` | The expectation fails in both builds |
+| `execution_failure` | Missing test, failed navigation, unavailable verification, cleanup failure, or an inconclusive outcome |
+| `changed` | Different contract, observation, route, or control; review required |
+| `coverage_gap` | Incomplete crawl, unsupported discovered checks, or newly discovered routes |
+
+Reports include current test records, step/API evidence, cleanup status, crawl
+coverage, and a separate `suggestions` list. Checkout proposals flag untested
+payment-failure recovery as a coverage/improvement opportunity. An optional
+upsell step is acceptable when a recorded path reaches a valid outcome; replay
+still requires a usable saved path. UI comparison is DOM/control/count based,
+not pixel comparison, and currently compares one representative state per route.
+
+Regression exits `1` for confirmed or suspected regressions, `2` for execution
+failures when no regression was found, and `0` otherwise. Always inspect coverage:
+zero confirmed regressions is not a claim of whole-application correctness.
+An empty behavioral suite is an execution failure where tests were wanted; a
+baseline recorded with `--read-only` or `--no-flows` never asked for them, so
+its empty suite is reported as a coverage gap and exits `0`. Schema 1.0
+baselines do not record which they were and are read as wanting tests.
+Schema 1.0 baselines remain readable but cannot retroactively establish
+reviewed expectations.
+
+Baselines are immutable directories, published together by atomic rename. Use a
+new `--baseline-dir` for every version. Promotion requires both `--save-baseline`
+and `--new-baseline-dir runs/baselines/v2`; the source baseline is preserved.
+Storage remains JSON; no PostgreSQL service or migration is required.
+
+Run deterministic unit, browser, and CLI integration tests without LLM credentials:
+
+```sh
+.venv/bin/python -m unittest discover -s tests -v
+```

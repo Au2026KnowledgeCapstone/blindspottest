@@ -176,6 +176,9 @@ with what broke.\
 """
 
 
+SYSTEM_PROMPT += "\nOnly findings with direction regressed are confirmed behavioral regressions. Suspected, execution_failure, coverage_gap and changed findings must retain their uncertainty; do not upgrade them to confirmed defects."
+
+
 def build_user_prompt(findings: FindingSet, *, limit: int = MAX_FINDINGS) -> str:
     """Render the findings as the user turn, most important first."""
     ranked = findings.ranked()
@@ -297,17 +300,15 @@ def fallback(findings: FindingSet) -> InterpretationResult:
     the run: the findings were computed without a model and are the actual
     evidence, so they remain useful on their own.
     """
-    regressions = findings.regressions
-    if not regressions:
-        overall = (
-            f"No regressions found. {findings.counts()['changed']} neutral "
-            f"change(s) were recorded."
-        )
-    else:
-        overall = (
-            f"{len(regressions)} regression(s) found, un-interpreted "
-            f"(no LLM backend available)."
-        )
+    counts = findings.counts()
+    overall = (
+        f"{counts['regressed']} confirmed regressions, "
+        f"{counts['suspected']} suspected regressions, "
+        f"{counts['execution_failure']} execution failures, "
+        f"{counts['existing_violation']} existing violations, "
+        f"{counts['coverage_gap']} coverage gaps and {counts['changed']} changes. "
+        "Results cover only the recorded tests and explored states."
+    )
     return InterpretationResult(
         model="(none)",
         interpretations=[],
