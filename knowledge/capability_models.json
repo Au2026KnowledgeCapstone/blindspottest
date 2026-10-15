@@ -1,0 +1,21 @@
+{
+  "multi_step_transaction": {
+    "assumptions": ["Line totals include all charges, discounts, shipping and tax exactly once", "Amounts use one currency and consistent rounding"],
+    "branches": [{"branch": "payment_failure", "explored": false, "evidence": "The successful checkout path does not establish failure recovery coverage", "missing": "Payment retry behavior has not been verified", "recommendation": "Explore a declined-payment fixture and check that users can retry without losing appropriate checkout details"}]
+  },
+  "delete_resource": {
+    "assumptions": ["The action means permanent deletion, not archiving", "The stated count describes all displayed rows, without pagination or hidden filtering"]
+  },
+  "session_termination": {
+    "assumptions": ["The probed URL requires authentication", "The probe uses the session that signed out"]
+  },
+  "sort_collection": {
+    "assumptions": ["The selected order is ascending and the parsed column is numeric"]
+  },
+  "filter_collection": {
+    "assumptions": ["The stated count describes displayed rows rather than all pages"]
+  },
+  "create_resource": {
+    "assumptions": ["The observed resource corresponds to this test's creation action"]
+  }
+}

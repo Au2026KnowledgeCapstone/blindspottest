@@ -32,6 +32,10 @@ class Direction(str, Enum):
     REGRESSED = "regressed"
     FIXED = "fixed"
     CHANGED = "changed"
+    SUSPECTED = "suspected"
+    EXECUTION = "execution_failure"
+    EXISTING = "existing_violation"
+    COVERAGE = "coverage_gap"
 
 
 class Kind(str, Enum):
@@ -95,6 +99,10 @@ class Finding:
 # Severity ranking used only for ordering a report. A regression outranks
 # everything, because the question being asked is "did anything break".
 _DIRECTION_RANK = {
+    Direction.SUSPECTED: 1,
+    Direction.EXECUTION: 2,
+    Direction.EXISTING: 3,
+    Direction.COVERAGE: 4,
     Direction.REGRESSED: 0,
     Direction.FIXED: 1,
     Direction.CHANGED: 2,
@@ -153,6 +161,8 @@ class FindingSet:
             "regressed": len(self.of_direction(Direction.REGRESSED)),
             "fixed": len(self.of_direction(Direction.FIXED)),
             "changed": len(self.of_direction(Direction.CHANGED)),
+            **{d.value: len(self.of_direction(d)) for d in (
+                Direction.SUSPECTED, Direction.EXECUTION, Direction.EXISTING, Direction.COVERAGE)},
             **{
                 kind.value: sum(1 for f in self.findings if f.kind is kind)
                 for kind in Kind

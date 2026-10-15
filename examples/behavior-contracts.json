@@ -1,0 +1,18 @@
+{
+  "flow-001": {
+    "capability": "multi_step_transaction",
+    "invariant": "TOTAL_CONSISTENCY",
+    "expected_relation": "sum(line_totals) == order_total",
+    "precondition": "goal_reached == true",
+    "review_status": "inferred",
+    "evidence": ["Illustrative checkout contract; replace with observed application evidence"],
+    "assumptions": ["Line totals include tax, shipping and discounts exactly once"],
+    "fixture_version": "checkout-cart-v1",
+    "session_scoped": true,
+    "setup": [],
+    "preconditions": [{"selector": "[data-testid='cart-total']", "kind": "text", "expected": "$278.00"}],
+    "ready": [{"selector": "[data-testid='order-confirmation']", "kind": "visible", "expected": true}],
+    "api_assertions": [{"path": "/api/test-session/latest-order", "json_path": ["total_cents"], "expected": 27800, "timeout_ms": 3000}],
+    "branches": [{"branch": "payment_failure", "explored": false, "evidence": "Only the successful checkout path was observed", "missing": "Payment retry behavior is not verified", "recommendation": "Exercise a declined payment and verify retry preserves appropriate checkout details"}]
+  }
+}

@@ -39,7 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 
 MANIFEST_FILE = "manifest.json"
 GRAPH_FILE = "graph.json"
@@ -73,6 +73,7 @@ class TestRecord:
     states: list[dict] = field(default_factory=list)
     error: str | None = None
     duration_ms: int = 0
+    evidence: dict = field(default_factory=dict)
 
     @property
     def status(self) -> str:
@@ -89,6 +90,7 @@ class TestRecord:
             "states": self.states,
             "error": self.error,
             "duration_ms": self.duration_ms,
+            "evidence": self.evidence,
         }
 
     @classmethod
@@ -103,6 +105,7 @@ class TestRecord:
             states=data.get("states", []),
             error=data.get("error"),
             duration_ms=data.get("duration_ms", 0),
+            evidence=data.get("evidence", {}),
         )
 
 
@@ -119,6 +122,7 @@ class BaselineRecord:
     graph: dict = field(default_factory=dict)
     readables: dict[str, dict] = field(default_factory=dict)
     tests: list[TestRecord] = field(default_factory=list)
+    coverage: dict = field(default_factory=dict)
 
     def manifest(self) -> dict:
         """The metadata half, written to `manifest.json`.
@@ -134,6 +138,7 @@ class BaselineRecord:
             "base_url": self.base_url,
             "entry": self.entry,
             "model": self.model,
+            "coverage": self.coverage,
             "counts": {
                 "states": len(self.graph.get("states", [])),
                 "actions": len(self.graph.get("actions", [])),
@@ -163,7 +168,7 @@ def check_version(manifest: dict) -> None:
     with defects that are really format drift.
     """
     found = manifest.get("schema_version")
-    if found != SCHEMA_VERSION:
+    if found not in ("1.0", SCHEMA_VERSION):
         raise BaselineError(
             f"baseline schema version {found!r} is not {SCHEMA_VERSION!r}; "
             f"re-record the baseline with this build"

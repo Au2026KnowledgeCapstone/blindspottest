@@ -60,6 +60,8 @@ def page_test_record(instance, result, verdict) -> TestRecord:
 
 def flow_test_record(instance, result, verdict) -> TestRecord:
     """One flow-level test, as a baseline entry."""
+    from knowledge.contracts import BehaviorContract, suggestions
+    proposed = suggestions(BehaviorContract.model_validate(instance.contract)) if instance.contract else []
     return TestRecord(
         test_id=instance.test_id,
         kind=FLOW,
@@ -68,6 +70,8 @@ def flow_test_record(instance, result, verdict) -> TestRecord:
         observations=dict(result.observations),
         verdict=verdict.to_dict(),
         states=list(result.states),
+        evidence={"steps": [s.to_dict() for s in result.steps],
+                  "notes": result.notes, "cleanup_verified": result.reset, "suggestions": proposed},
         error=result.error,
         duration_ms=result.duration_ms,
     )
@@ -79,6 +83,7 @@ def build(
     tests: Iterable[TestRecord],
     readables: dict[str, dict] | None = None,
     model: str = "",
+    coverage: dict | None = None,
 ) -> BaselineRecord:
     """Assemble a baseline record from a crawl and its test results."""
     return BaselineRecord(
@@ -89,26 +94,30 @@ def build(
         graph=graph.to_dict(),
         readables=readables or {},
         tests=list(tests),
+        coverage=coverage or {},
     )
 
 
 def save(record: BaselineRecord, directory: Path | str) -> Path:
     """Write a baseline into `directory`, creating it if needed."""
+    import tempfile
+    import shutil
+    from baseline.record_schema import BaselineError
     directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
-
-    # The graph goes first and the manifest last: the manifest is what a
-    # loader checks for, so writing it only once the parts it describes are
-    # all on disk means an interrupted save leaves a directory that is
-    # recognisably incomplete rather than one that looks whole and is not.
-    _write_json(directory / GRAPH_FILE, record.graph)
-    _write_json(directory / READABLES_FILE, record.readables)
-    _write_json(
-        directory / TESTS_FILE,
-        {"tests": [t.to_dict() for t in record.tests]},
-    )
-    _write_json(directory / MANIFEST_FILE, record.manifest())
-
+    if directory.exists():
+        raise BaselineError(f"baseline {directory} already exists; choose a new version directory")
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".baseline-", dir=directory.parent))
+    try:
+        _write_json(staging / GRAPH_FILE, record.graph)
+        _write_json(staging / READABLES_FILE, record.readables)
+        _write_json(staging / TESTS_FILE, {"tests": [t.to_dict() for t in record.tests]})
+        _write_json(staging / MANIFEST_FILE, record.manifest())
+        # Atomic publication: the complete directory appears together.
+        os.rename(staging, directory)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
     return directory
 
 

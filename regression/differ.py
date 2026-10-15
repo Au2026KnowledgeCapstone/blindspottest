@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import math
 from typing import Any
+from urllib.parse import urlsplit
 
 from baseline.record_schema import BaselineRecord, TestRecord
 from discovery.graph import AppGraph
@@ -76,38 +77,47 @@ def _brief(value: Any, limit: int = 90) -> str:
 # Verdicts and observations
 # --------------------------------------------------------------------------
 
-# A verdict change is only a regression in some directions. Going from
-# "holds" to "violated" is the headline; going from "holds" to "inconclusive"
-# is also a regression, because a test that can no longer answer has stopped
-# protecting anything — that is precisely the failure the old page-shaped
-# pipeline had on flow-shaped behaviour, and it must not read as neutral.
-_DIRECTIONS = {
-    ("holds", "violated"): Direction.REGRESSED,
-    ("holds", "inconclusive"): Direction.REGRESSED,
-    ("inconclusive", "violated"): Direction.REGRESSED,
-    ("violated", "holds"): Direction.FIXED,
-    ("inconclusive", "holds"): Direction.FIXED,
-    ("violated", "inconclusive"): Direction.CHANGED,
-}
-
-
+# Execution health and correctness are separate; only reviewed expectations
+# under matching fixture contracts can produce confirmed regressions.
 def _verdict_finding(before: TestRecord, after: TestRecord) -> Finding | None:
     was, now = before.status, after.status
-    if was == now:
+    old_contract = before.instance.get("contract", {})
+    new_contract = after.instance.get("contract", {})
+    # Only compare the same recorded semantics and fixture declaration.
+    execution_keys = ("capability", "setup", "goal", "bindings", "procedure", "probe_mode", "probe_path")
+    comparable = (all(before.instance.get(k) == after.instance.get(k) for k in execution_keys) and
+                  old_contract == new_contract and
+                  before.instance.get("expected_relation") == after.instance.get("expected_relation") and
+                  before.instance.get("precondition") == after.instance.get("precondition"))
+    if not comparable:
+        return Finding(Kind.VERDICT, Direction.CHANGED, after.test_id,
+                       "Expectation or fixture contract changed; results are not directly comparable",
+                       invariant=after.invariant, before=was, after=now)
+    if now == "inconclusive" or after.error or after.evidence.get("cleanup_verified") is False:
+        direction = Direction.EXECUTION
+    elif now == "violated" and was == "violated":
+        direction = Direction.EXISTING
+    elif now == "violated" and was == "holds":
+        confirmed = (new_contract.get("review_status") == "confirmed"
+                     and new_contract.get("reviewed_by")
+                     and new_contract.get("requirement_source")
+                     and new_contract.get("fixture_version")
+                     and before.observations.get("fixture_ready") is True
+                     and after.observations.get("fixture_ready") is True
+                     and not before.error
+                     and before.evidence.get("cleanup_verified") is not False)
+        direction = Direction.REGRESSED if confirmed else Direction.SUSPECTED
+    elif now == "violated":
+        direction = Direction.SUSPECTED
+    elif was != now and now == "holds":
+        direction = Direction.FIXED
+    else:
         return None
-
-    direction = _DIRECTIONS.get((was, now), Direction.CHANGED)
-    detail = after.verdict.get("detail", "")
     return Finding(
-        kind=Kind.VERDICT,
-        direction=direction,
-        subject=after.test_id,
-        invariant=after.invariant,
-        severity=after.verdict.get("severity"),
-        summary=f"{after.invariant} went from {was} to {now}",
-        detail=detail,
-        before=was,
-        after=now,
+        kind=Kind.VERDICT, direction=direction, subject=after.test_id,
+        invariant=after.invariant, severity=after.verdict.get("severity"),
+        summary=f"{after.invariant}: {was} -> {now}",
+        detail=after.verdict.get("detail", ""), before=was, after=now,
     )
 
 
@@ -122,7 +132,10 @@ def _observation_findings(before: TestRecord, after: TestRecord) -> list[Finding
     out: list[Finding] = []
     names = set(before.observations) | set(after.observations)
 
+    ignored = after.instance.get("contract", {}).get("ignored_observations", {})
     for name in sorted(names):
+        if name in ignored:
+            continue
         had, has = name in before.observations, name in after.observations
         old = before.observations.get(name)
         new = after.observations.get(name)
@@ -130,7 +143,7 @@ def _observation_findings(before: TestRecord, after: TestRecord) -> list[Finding
         if had and not has:
             out.append(Finding(
                 kind=Kind.OBSERVATION,
-                direction=Direction.REGRESSED,
+                direction=Direction.EXECUTION,
                 subject=after.test_id,
                 invariant=after.invariant,
                 summary=f"{name} is no longer observed",
@@ -176,7 +189,7 @@ def _run_finding(before: TestRecord, after: TestRecord) -> Finding | None:
     if after.error and not before.error:
         return Finding(
             kind=Kind.RUN,
-            direction=Direction.REGRESSED,
+            direction=Direction.EXECUTION,
             subject=after.test_id,
             invariant=after.invariant,
             summary=f"{after.invariant} now fails to run",
@@ -223,7 +236,7 @@ def diff_tests(baseline: BaselineRecord, current: BaselineRecord) -> list[Findin
             # failures. It has to be a finding in its own right.
             out.append(Finding(
                 kind=Kind.MISSING,
-                direction=Direction.REGRESSED,
+                direction=Direction.EXECUTION,
                 subject=test_id,
                 invariant=before.invariant,
                 summary=f"{before.invariant} was not run against this build",
@@ -271,13 +284,12 @@ def _routes(graph: AppGraph) -> dict[str, str]:
     application live at different prefixes — `/cart` against `/broken/cart` —
     so their fingerprints never match even where the page is identical.
     """
-    entry = graph.states.get(graph.entry)
-    prefix = (entry.url_template or "/").rstrip("/") if entry else ""
+    prefix = urlsplit(graph.base_url).path.rstrip("/")
 
     out: dict[str, str] = {}
     for state in graph.states.values():
         route = state.url_template
-        if prefix and route.startswith(prefix):
+        if prefix and (route == prefix or route.startswith(prefix + "/")):
             route = route[len(prefix):] or "/"
         out[route] = state.id
     return out
@@ -310,7 +322,7 @@ def diff_structure(baseline: BaselineRecord, current: BaselineRecord) -> list[Fi
     for route in sorted(set(before_routes) - set(after_routes)):
         out.append(Finding(
             kind=Kind.STRUCTURE,
-            direction=Direction.REGRESSED,
+            direction=Direction.CHANGED,
             subject=route,
             summary=f"route {route} is no longer exposed",
             detail=(
@@ -323,7 +335,7 @@ def diff_structure(baseline: BaselineRecord, current: BaselineRecord) -> list[Fi
     for route in sorted(set(after_routes) - set(before_routes)):
         out.append(Finding(
             kind=Kind.STRUCTURE,
-            direction=Direction.CHANGED,
+            direction=Direction.COVERAGE,
             subject=route,
             summary=f"route {route} is new",
             detail=f"this crawl reached it; the baseline did not{caveat}",
@@ -348,6 +360,18 @@ def diff(
 ) -> FindingSet:
     """Everything that moved between a baseline and a later run."""
     found = FindingSet()
+    if not baseline.tests:
+        found.add(Finding(Kind.MISSING, Direction.EXECUTION, "test-suite",
+                          "Baseline contains no tests; behavioral regression coverage is empty"))
+    for side, record in (("baseline", baseline), ("current", current)):
+        if record.graph and not AppGraph.from_dict(record.graph).is_closed():
+            found.add(Finding(Kind.STRUCTURE, Direction.COVERAGE, side,
+                              f"{side} crawl is incomplete; absence claims require review"))
+    for skipped in baseline.coverage.get("skipped", []):
+        found.add(Finding(Kind.MISSING, Direction.COVERAGE,
+                          skipped.get("invariant", "unsupported"),
+                          "Discovered behavior has no runnable check",
+                          detail="; ".join(skipped.get("reasons", []))))
     found.extend(diff_tests(baseline, current))
     if include_structure:
         found.extend(diff_structure(baseline, current))

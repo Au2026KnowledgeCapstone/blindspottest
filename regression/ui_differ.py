@@ -20,7 +20,7 @@ still line up.
 
 Severity, and why most of this is `changed` rather than `regressed`:
 a reworded button is not a defect, and a report that treats every textual
-difference as one is a report that gets ignored. Only losses are called
+difference as one is a report that gets ignored. Losses are reviewable changes rather than confirmed
 regressions — a control that disappeared, a name that went missing, a
 selector that stopped matching — because those are the differences that take
 capability away rather than merely move it.
@@ -29,6 +29,7 @@ capability away rather than merely move it.
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlsplit
 
 from discovery.fingerprint import element_signature
 from discovery.graph import AppGraph
@@ -41,13 +42,12 @@ _MAX_PER_STATE = 6
 
 
 def _routes_to_states(graph: AppGraph) -> dict[str, Any]:
-    entry = graph.states.get(graph.entry)
-    prefix = (entry.url_template or "/").rstrip("/") if entry else ""
+    prefix = urlsplit(graph.base_url).path.rstrip("/")
 
     out: dict[str, Any] = {}
     for state in graph.states.values():
         route = state.url_template
-        if prefix and route.startswith(prefix):
+        if prefix and (route == prefix or route.startswith(prefix + "/")):
             route = route[len(prefix):] or "/"
         # One representative state per route. Several states can share a
         # route — a cart with and without items — and comparing every
@@ -103,7 +103,7 @@ def _diff_controls(route: str, before, after) -> list[Finding]:
     out.extend(_capped([
         Finding(
             kind=Kind.UI,
-            direction=Direction.REGRESSED,
+            direction=Direction.CHANGED,
             subject=route,
             summary=f"control {_named(element)!r} is gone from {route}",
             detail=(
@@ -143,7 +143,7 @@ def _diff_controls(route: str, before, after) -> list[Finding]:
         if was.get("accessible_name") and not now.get("accessible_name"):
             losses.append(Finding(
                 kind=Kind.UI,
-                direction=Direction.REGRESSED,
+                direction=Direction.CHANGED,
                 subject=route,
                 summary=(
                     f"control {was['accessible_name']!r} on {route} lost its "
@@ -156,7 +156,7 @@ def _diff_controls(route: str, before, after) -> list[Finding]:
         if not was.get("disabled") and now.get("disabled"):
             losses.append(Finding(
                 kind=Kind.UI,
-                direction=Direction.REGRESSED,
+                direction=Direction.CHANGED,
                 subject=route,
                 summary=f"control {_named(now)!r} on {route} is now disabled",
                 detail="it was actionable in the baseline",
@@ -179,7 +179,7 @@ def _diff_values(route: str, before: dict, after: dict) -> list[Finding]:
     out.extend(_capped([
         Finding(
             kind=Kind.UI,
-            direction=Direction.REGRESSED,
+            direction=Direction.CHANGED,
             subject=route,
             summary=f"{entry['selector']} no longer renders anything on {route}",
             detail=(
