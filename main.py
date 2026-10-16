@@ -428,6 +428,9 @@ def _flow_candidates(graph, readables, args, console):
 
     console.flow_classified(result)
     if args.save_flow_candidates:
+        # The directory may not exist yet on a first run, and this write is
+        # the only copy of an answer that cost an LLM call to produce.
+        args.save_flow_candidates.parent.mkdir(parents=True, exist_ok=True)
         args.save_flow_candidates.write_text(
             FlowCandidateSet(candidates=result.candidates).model_dump_json(indent=2)
         )
@@ -849,6 +852,7 @@ def run_adhoc(args) -> int:
                 model_name = classification.model
                 console.classified(classification)
                 if args.save_candidates:
+                    args.save_candidates.parent.mkdir(parents=True, exist_ok=True)
                     args.save_candidates.write_text(
                         CandidateSet(candidates=candidates).model_dump_json(indent=2)
                     )

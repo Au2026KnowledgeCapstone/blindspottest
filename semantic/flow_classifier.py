@@ -26,9 +26,11 @@ Defaults to OpenAI — `BLINDSPOT_LLM_PROVIDER` still wins when set, and
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Iterable
 
 from discovery.graph import AppGraph
+from knowledge.capabilities import render_definitions
 from discovery.projections import summary
 from discovery.readable import summarize as summarize_readable
 from semantic.backends import LLMBackend, backend_for
@@ -119,6 +121,30 @@ Return only capabilities you actually believe in. An empty list is a valid \
 answer for a map with none. Do not return two candidates for the same \
 capability and goal state.\
 """
+
+
+def build_system_prompt(path: str | Path | None = None) -> str:
+    """The static instructions, plus what each capability name means.
+
+    The definitions are appended rather than inlined so that one file,
+    `knowledge/capabilities.json`, is the only place a capability is defined
+    — the same text the report explains a coverage gap with. Before this,
+    the prompt named nine capabilities and defined none of them, and
+    "is this a deletion or an archive?" was answered by the model's prior
+    for the word alone.
+    """
+    definitions = (
+        render_definitions(path=path) if path else render_definitions()
+    )
+    return (
+        f"{SYSTEM_PROMPT}\n\n"
+        "WHAT EACH CAPABILITY MEANS — classify against these definitions, "
+        "not against what the words usually suggest. `evidence for` and "
+        "`NOT` are evidence to weigh, not a checklist; when a region matches "
+        "a NOT line, it is not that capability, however close the label "
+        "sounds.\n\n"
+        f"{definitions}"
+    )
 
 
 def build_user_prompt(
@@ -249,7 +275,7 @@ def classify_flows(
     backend = backend or backend_for(default_provider=DEFAULT_PROVIDER)
 
     raw = backend.complete_json(
-        system=SYSTEM_PROMPT,
+        system=build_system_prompt(),
         user=build_user_prompt(graph, readables),
         schema=flow_candidate_set_schema(),
     )
@@ -283,6 +309,9 @@ if __name__ == "__main__":
     found = json.loads(args.readables.read_text()) if args.readables else None
 
     if args.prompt_only:
+        print("=== SYSTEM ===")
+        print(build_system_prompt())
+        print("\n=== USER ===")
         print(build_user_prompt(loaded, found))
         raise SystemExit(0)
 

@@ -258,6 +258,15 @@ _UNSUPPORTED_SCHEMA_KEYWORDS = frozenset({
 
 def _strip_unsupported(node: Any) -> Any:
     if isinstance(node, dict):
+        # A `$ref` may not carry siblings: OpenAI rejects the whole schema with
+        # "$ref cannot have keywords {'description'}". Pydantic emits exactly
+        # that shape for any field whose type is a model or enum and which also
+        # has a Field(description=...) — so the sibling is dropped rather than
+        # the reference. Nothing is lost that the model needs: per-field
+        # guidance belongs in the system prompt, which is where every one of
+        # these descriptions is already stated at length.
+        if "$ref" in node:
+            return {"$ref": node["$ref"]}
         return {
             k: _strip_unsupported(v)
             for k, v in node.items()

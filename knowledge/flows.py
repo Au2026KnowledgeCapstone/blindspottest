@@ -431,6 +431,21 @@ class FlowSkipped:
     unmet: tuple[str, ...]
 
 
+def _no_invariant_reason(capability: str) -> str:
+    """Why a capability the rule base does not cover was not tested.
+
+    Reads the explanation out of `knowledge/capabilities.json` so the report
+    and the classifier's prompt give the same account of the same gap.
+    """
+    try:
+        from knowledge.capabilities import unsupported
+
+        gap = unsupported().get(capability)
+    except Exception:  # definitions are advisory here; never block a run
+        gap = None
+    return gap or f"no invariant is defined for capability {capability!r}"
+
+
 # --------------------------------------------------------------------------
 # Turning graph paths into replayable steps
 # --------------------------------------------------------------------------
@@ -626,7 +641,22 @@ class FlowEngine:
         counter = start
 
         for candidate in candidates:
-            for inv in self.invariants_for(candidate.capability.value):
+            applicable = self.invariants_for(candidate.capability.value)
+            if not applicable:
+                # Without this the candidate produces neither an instance nor
+                # a skip and simply disappears, while the record goes on
+                # reporting `skipped: 0` — the one outcome this method's
+                # contract rules out. A capability the rule base does not
+                # cover is a coverage gap, and saying so is the point.
+                skipped.append(
+                    FlowSkipped(
+                        candidate=candidate,
+                        invariant_id="(no invariant)",
+                        unmet=(_no_invariant_reason(candidate.capability.value),),
+                    )
+                )
+                continue
+            for inv in applicable:
                 unmet = inv.unmet_requirements(candidate, graph)
                 missing = inv.missing_bindings(candidate)
                 if missing:

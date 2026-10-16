@@ -1,0 +1,157 @@
+{
+  "schema_version": 1,
+  "_comment": [
+    "What each capability name MEANS. Until this file existed the names in",
+    "`semantic.flow_schemas.FlowCapability` were bare strings: the classifier",
+    "was given a vocabulary and no definitions, so recognising a deletion",
+    "rested entirely on the model's prior for the English word. Everything",
+    "downstream then treated the label as fact — a mislabelled region becomes",
+    "a high-severity finding about the application rather than a bad guess.",
+    "",
+    "`signals` and `excludes` are evidence to weigh, not a checklist. The",
+    "graph the classifier reads holds control labels, routes and transitions,",
+    "so every signal is written in those terms and nothing here asks about",
+    "page content the model was never shown.",
+    "",
+    "`supported: false` means the rule base has no invariant for this",
+    "capability yet. Such a candidate is still worth proposing: it is",
+    "reported as a named coverage gap instead of disappearing, which is the",
+    "whole difference between 'we did not test this' and silence."
+  ],
+  "capabilities": {
+    "create_resource": {
+      "definition": "A user brings a new resource into existence, and it is afterwards addressable in its own right.",
+      "signals": [
+        "a control labelled New/Add/Create leading to a form route such as /things/new",
+        "submitting that form lands on a detail route for an instance that did not previously exist",
+        "the collection it returns to gains a row"
+      ],
+      "excludes": [
+        "adding an item to a cart or basket — that mutates one existing resource rather than creating an addressable one",
+        "a form that edits something already present (that is update_resource)",
+        "sign-up, which creates a session as well and is authenticate"
+      ],
+      "outcome": "The new resource's own URL answers after the flow, so the probe is `final`.",
+      "supported": true
+    },
+
+    "update_resource": {
+      "definition": "A user changes a field of an existing resource and the change is expected to persist.",
+      "signals": [
+        "an Edit control on a resource detail route leading to a form pre-filled with that resource's current values",
+        "a Save/Update control returning to the same resource"
+      ],
+      "excludes": [
+        "a form that creates something new",
+        "view state that is not written back — sorting, filtering, collapsing a sidebar"
+      ],
+      "outcome": "The changed value is readable on the resource after the flow.",
+      "supported": false,
+      "gap": "No flow invariant asserts this yet. The page-level persistence invariants cover the single-page version of the same idea; they cannot follow a commit that navigates."
+    },
+
+    "delete_resource": {
+      "definition": "A user permanently removes a resource, and it stops existing — not merely stops being listed.",
+      "signals": [
+        "a Delete/Remove/Destroy control on a resource's own detail route",
+        "the flow returns to the collection the resource belonged to",
+        "the collection has one fewer row afterwards"
+      ],
+      "excludes": [
+        "archiving, disabling, deactivating, cancelling or marking something inactive — the row disappears but the resource is meant to survive, so the deletion assertion would be wrong",
+        "removing a line from a cart or a list that is itself one editable resource",
+        "clearing filters or a search, which removes rows from a view and nothing from the application"
+      ],
+      "outcome": "The resource's own URL must stop answering, which is why this needs a `captured` probe taken before the deletion.",
+      "supported": true
+    },
+
+    "authenticate": {
+      "definition": "A user establishes a session by proving who they are.",
+      "signals": [
+        "a login route with credential fields and a Sign in / Log in control",
+        "the flow lands somewhere only a signed-in user reaches"
+      ],
+      "excludes": [
+        "signing out (that is session_termination)",
+        "a form that merely collects contact details during checkout"
+      ],
+      "outcome": "Evidence the session is active is readable after the flow.",
+      "supported": false,
+      "gap": "No flow invariant asserts this yet. Candidates are reported as a coverage gap. Note the crawler already signs in via --credential to reach authenticated states, so this capability is about *asserting* the sign-in, not about reaching the pages behind it."
+    },
+
+    "session_termination": {
+      "definition": "A user ends their session, and access that depended on it stops working.",
+      "signals": [
+        "a Sign out / Log out control, usually on an account or profile route",
+        "the flow returns to a login or public landing route"
+      ],
+      "excludes": [
+        "navigating away from an account page while still signed in",
+        "switching accounts or profiles without dropping the session"
+      ],
+      "outcome": "A protected path must stop being reachable, so this needs a `path` probe naming one. A page that answers 200 by redirecting to a login screen is NOT reachable for this purpose — the probe compares the answering path with the requested one.",
+      "supported": true
+    },
+
+    "sort_collection": {
+      "definition": "A user reorders a collection by a column it displays, without changing which rows are in it.",
+      "signals": [
+        "a sort control, or a sort parameter appearing in the route",
+        "the same rows appear in a different order afterwards",
+        "the ordered column is numeric or a date, so an ordering can actually be checked"
+      ],
+      "excludes": [
+        "filtering or searching, which changes which rows are present (that is filter_collection)",
+        "pagination",
+        "a sort over a column with no order to verify, such as free text"
+      ],
+      "outcome": "The sorted column's values, in displayed order, must be non-decreasing. Read them as numbers: a sort applied to the rendered string is exactly the defect this catches, and reading strings back would reproduce the bug rather than detect it.",
+      "supported": true
+    },
+
+    "filter_collection": {
+      "definition": "A user narrows a collection to a subset, and the page both displays and states how many rows remain.",
+      "signals": [
+        "a filter or search control whose submission adds query parameters to the route",
+        "the page states a count alongside the rows it shows"
+      ],
+      "excludes": [
+        "sorting, which reorders without narrowing",
+        "a filter whose result page states no count — there is then nothing for the collection-count invariant to compare against"
+      ],
+      "outcome": "The stated count and the displayed row count must agree.",
+      "supported": true
+    },
+
+    "search": {
+      "definition": "A user queries a collection by free text and is shown matches.",
+      "signals": [
+        "a search field whose submission puts a query term in the route",
+        "results that vary with the term"
+      ],
+      "excludes": [
+        "a faceted filter with fixed options, which is filter_collection"
+      ],
+      "outcome": "Results correspond to the term searched for.",
+      "supported": false,
+      "gap": "No flow invariant asserts this yet, and relevance is not mechanically checkable the way a count or an ordering is. When a search page states a result count, prefer filter_collection, which can be checked."
+    },
+
+    "multi_step_transaction": {
+      "definition": "A user completes a purchase or submission across several pages, ending on a confirmation that itemises what was committed and totals it.",
+      "signals": [
+        "a sequence of routes under a common prefix such as /checkout/*",
+        "a terminal Place order / Submit / Confirm control",
+        "a confirmation page listing individual amounts and a grand total"
+      ],
+      "excludes": [
+        "a single-page form with no itemised total",
+        "the cart itself, which is the setup for this capability rather than the capability"
+      ],
+      "outcome": "The individual line amounts must sum to the stated grand total. The capability is a reachability claim, not a fixed path: an optional upsell step appearing between runs leaves it intact.",
+      "supported": true
+    }
+  }
+}
