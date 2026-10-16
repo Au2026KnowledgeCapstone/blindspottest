@@ -1,6 +1,6 @@
 """Pydantic contracts for the flow mapper's output.
 
-The page-level mapper in `semantic.schemas` points at one element and says
+The page-level mapper in `semantic.page_schemas` points at one element and says
 "persistence testing applies here". This one reads an application *map* — the
 summary projection of a crawled `AppGraph` — and points at a path through it:
 "the states between here and there are a DELETE_RESOURCE, and this is where
@@ -36,7 +36,7 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from semantic.schemas import strict_schema
+from semantic.backends import strict_schema
 
 
 class FlowCapability(str, Enum):

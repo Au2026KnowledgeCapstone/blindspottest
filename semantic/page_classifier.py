@@ -1,21 +1,25 @@
-"""Semantic mapper: hand a page snapshot to an LLM, get back testable candidates.
+"""Page mapper: hand ONE page snapshot to an LLM, get back testable candidates.
 
-Provider-agnostic by construction. The classifier only knows about an
-`LLMBackend` — anything that can take a system prompt, a user prompt, and a
-JSON Schema, and return JSON text. Claude is the default backend because it
-supports strict structured outputs, but nothing in the classification logic
-depends on it.
+The narrower of the system's two semantic stages, and the original one:
 
-Selecting a model:
+    this module             one page snapshot  -> persistent_mutation candidates
+    semantic.flow_classifier  an application map -> capability candidates
 
-    # explicit — the usual way
-    classify(snapshot, backend=AnthropicBackend(model="claude-sonnet-5"))
+Scope is enforced by the schema, not just by the prompt: every candidate's
+`interaction_type` is a `Literal[PERSISTENT_MUTATION]`, and that enum has one
+member, because `knowledge/invariants/persistence.json` has invariants for
+exactly one category. Broadening what this stage looks for means adding an
+enum member, a candidate model, and an invariant — editing the prompt alone
+would produce candidates that fail validation. Capabilities beyond persistence
+(deletion, sorting, checkout, sign-out) belong to the flow classifier, which
+can see across states; this one cannot, by construction.
 
-    # environment, or a .env file in the working directory
-    BLINDSPOT_LLM_PROVIDER=openai BLINDSPOT_LLM_MODEL=gpt-5
+It is reached two ways: `main.py --with-pages` during a baseline, and the
+ad-hoc single-page pipeline (`make demo`, `make scan`, `make edit`).
 
-    # your own provider
-    register_backend("acme", lambda model: AcmeBackend(model or "acme-1"))
+Provider-agnostic by construction — it knows only `LLMBackend` from
+`semantic.backends`, which owns model selection, `.env` loading, and the
+strict-schema sanitisation.
 
 The boundary this module enforces: the LLM says "persistence testing applies
 here", never "this is broken". Nothing downstream of `classify()` treats a
@@ -25,11 +29,9 @@ candidate as a defect.
 from __future__ import annotations
 
 import json
-import os
-from pathlib import Path
-from typing import Callable, Protocol, runtime_checkable
 
-from semantic.schemas import (
+from semantic.backends import LLMBackend, backend_for
+from semantic.page_schemas import (
     CandidateSet,
     ClassificationResult,
     PersistentMutationCandidate,
@@ -109,151 +111,6 @@ no confidence attached.
 Return only candidates you actually believe in. An empty list is a valid and \
 correct answer for a page with no persistent state.\
 """
-
-
-@runtime_checkable
-class LLMBackend(Protocol):
-    """Minimum surface the classifier needs from any provider.
-
-    `complete_json` must return the model's raw response text, which should be
-    a JSON object conforming to `schema`. Enforcing that server-side is
-    preferred where the provider supports it; prompt-level instruction is an
-    acceptable fallback, since the result is validated here regardless.
-    """
-
-    model: str
-
-    def complete_json(self, *, system: str, user: str, schema: dict) -> str:
-        ...
-
-
-class AnthropicBackend:
-    """Default backend. Uses Claude's strict structured outputs.
-
-    The model is a constructor argument, not a constant — pass any Claude
-    model id, or set BLINDSPOT_LLM_MODEL.
-    """
-
-    DEFAULT_MODEL = "claude-opus-5"
-
-    def __init__(
-        self,
-        model: str | None = None,
-        *,
-        client=None,
-        max_tokens: int = 16_000,
-        effort: str | None = None,
-    ):
-        self.model = model or self.DEFAULT_MODEL
-        self.max_tokens = max_tokens
-        self.effort = effort
-        self._client = client
-
-    @property
-    def client(self):
-        # Imported lazily so the rest of the package works without the
-        # anthropic SDK installed — relevant when another provider is in use.
-        if self._client is None:
-            import anthropic
-
-            self._client = anthropic.Anthropic()
-        return self._client
-
-    def complete_json(self, *, system: str, user: str, schema: dict) -> str:
-        output_config: dict = {"format": {"type": "json_schema", "schema": schema}}
-        if self.effort:
-            output_config["effort"] = self.effort
-
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-            output_config=output_config,
-        )
-
-        # Safety classifiers can decline a request; content is then empty or
-        # partial, so check before indexing into it.
-        if response.stop_reason == "refusal":
-            raise RuntimeError(
-                f"{self.model} declined to classify this page "
-                f"(stop_reason=refusal)."
-            )
-
-        return next(block.text for block in response.content if block.type == "text")
-
-
-class OpenAIBackend:
-    """OpenAI backend, using strict JSON-schema structured outputs.
-
-    The schema `candidate_set_schema()` produces already satisfies OpenAI's
-    strict mode: every object carries `additionalProperties: false` and lists
-    every property in `required`. That is not a coincidence — the Pydantic
-    models were written with no field defaults for exactly this reason.
-    """
-
-    DEFAULT_MODEL = "gpt-5"
-
-    def __init__(self, model: str | None = None, *, client=None, max_tokens: int = 16_000):
-        self.model = model or self.DEFAULT_MODEL
-        self.max_tokens = max_tokens
-        self._client = client
-
-    @property
-    def client(self):
-        if self._client is None:
-            try:
-                import openai
-            except ImportError:
-                raise RuntimeError(
-                    "the openai package is not installed — "
-                    "run: .venv/bin/pip install openai"
-                ) from None
-            self._client = openai.OpenAI()  # reads OPENAI_API_KEY
-        return self._client
-
-    def complete_json(self, *, system: str, user: str, schema: dict) -> str:
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "candidate_set",
-                    "schema": schema,
-                    "strict": True,
-                },
-            },
-        )
-        choice = response.choices[0]
-        # Strict mode can still refuse; the refusal arrives in its own field
-        # rather than as an exception.
-        refusal = getattr(choice.message, "refusal", None)
-        if refusal:
-            raise RuntimeError(f"{self.model} declined to classify this page: {refusal}")
-        return choice.message.content
-
-
-_BACKENDS: dict[str, Callable[[str | None], LLMBackend]] = {
-    "anthropic": lambda model: AnthropicBackend(model),
-    "openai": lambda model: OpenAIBackend(model),
-}
-
-
-def register_backend(name: str, factory: Callable[[str | None], LLMBackend]) -> None:
-    """Register a provider under `name`.
-
-    The factory receives the configured model id (or None for the provider's
-    own default) and returns something satisfying `LLMBackend`.
-    """
-    _BACKENDS[name.lower()] = factory
-
-
-def available_backends() -> list[str]:
-    return sorted(_BACKENDS)
 
 
 def build_user_prompt(snapshot: dict) -> str:
@@ -339,7 +196,7 @@ def classify(
     `backend` to choose the provider and model, or let it come from the
     environment.
     """
-    backend = backend or backend_from_env()
+    backend = backend or backend_for(default_provider=DEFAULT_PROVIDER)
 
     raw = backend.complete_json(
         system=SYSTEM_PROMPT,
@@ -359,65 +216,6 @@ def classify(
     )
 
 
-def load_dotenv(path: str | os.PathLike = ".env") -> None:
-    """Read simple KEY=VALUE lines from a .env file into the environment.
-
-    Deliberately tiny and dependency-free. Real environment variables always
-    win, so an exported key is never silently overridden by a stale file.
-    """
-    file = Path(path)
-    if not file.is_file():
-        return
-    for line in file.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key, value = key.strip(), value.strip().strip("\"'")
-        if key and key not in os.environ:
-            os.environ[key] = value
-
-
-def backend_for(
-    provider: str | None = None,
-    model: str | None = None,
-    *,
-    default_provider: str | None = None,
-) -> LLMBackend:
-    """Build a backend explicitly, falling back to the environment per field.
-
-    `default_provider` lets a caller choose what to use when neither an
-    explicit provider nor the environment supplies one. The flow and
-    regression layers pass "openai"; the page-level classifier keeps
-    Anthropic, so adding those layers does not silently change what the
-    existing pipeline calls.
-    """
-    load_dotenv()
-    provider = (
-        provider
-        or os.environ.get("BLINDSPOT_LLM_PROVIDER")
-        or default_provider
-        or DEFAULT_PROVIDER
-    ).lower()
-    model = model or os.environ.get("BLINDSPOT_LLM_MODEL") or None
-
-    try:
-        factory = _BACKENDS[provider]
-    except KeyError:
-        raise ValueError(
-            f"Unknown LLM provider {provider!r}. "
-            f"Registered: {', '.join(available_backends())}. "
-            f"Use register_backend() to add your own."
-        ) from None
-
-    return factory(model)
-
-
-def backend_from_env() -> LLMBackend:
-    """Build a backend from BLINDSPOT_LLM_PROVIDER / BLINDSPOT_LLM_MODEL."""
-    return backend_for()
-
-
 if __name__ == "__main__":
     import argparse
 
@@ -431,6 +229,7 @@ if __name__ == "__main__":
 
     result = classify(
         inspect_page(args.url),
-        backend=backend_for(args.provider, args.model),
+        backend=backend_for(args.provider, args.model,
+                            default_provider=DEFAULT_PROVIDER),
     )
     print(result.model_dump_json(indent=2))

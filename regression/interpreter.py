@@ -45,8 +45,7 @@ from enum import Enum
 from pydantic import BaseModel, ConfigDict, Field
 
 from regression.findings import Direction, FindingSet
-from semantic.classifier import LLMBackend, backend_for
-from semantic.schemas import strict_schema
+from semantic.backends import LLMBackend, backend_for, strict_schema
 
 DEFAULT_PROVIDER = "openai"
 

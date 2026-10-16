@@ -1,10 +1,15 @@
-"""Pydantic contracts for the semantic mapper's output.
+"""Pydantic contracts for the PAGE-level mapper's output.
 
-The mapper's job is narrow: look at a page snapshot and point at interactions
-that *look like* persistent user-controlled state. It never judges correctness.
-"This is worth testing for persistence" is in scope; "this is broken" is not —
-that verdict belongs to the knowledge engine, after the runner has actually
-exercised the page.
+The page mapper's job is narrow: look at one page snapshot and point at
+interactions that *look like* persistent user-controlled state. It never
+judges correctness. "This is worth testing for persistence" is in scope;
+"this is broken" is not — that verdict belongs to the knowledge engine, after
+the runner has actually exercised the page.
+
+`InteractionType` has a single member, which is what keeps this stage honest
+about its scope: a candidate cannot name a category the persistence rule base
+has no invariant for. The graph-level counterpart, with the full capability
+enum, is `semantic.flow_schemas`.
 
 These models are provider-neutral. Nothing here imports an LLM SDK.
 """
@@ -12,9 +17,11 @@ These models are provider-neutral. Nothing here imports an LLM SDK.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from semantic.backends import strict_schema
 
 
 class InteractionType(str, Enum):
@@ -118,49 +125,12 @@ class RejectedCandidate(BaseModel):
 
 
 class ClassificationResult(BaseModel):
-    """What `semantic.classifier.classify()` hands back."""
+    """What `semantic.page_classifier.classify()` hands back."""
 
     url: str
     model: str
     candidates: list[PersistentMutationCandidate]
     rejected: list[RejectedCandidate]
-
-
-# JSON Schema keywords the strict structured-output modes of most providers
-# reject. We keep them on the Pydantic models — they still validate the parsed
-# response client-side — and strip them from the schema we hand to the LLM.
-_UNSUPPORTED_SCHEMA_KEYWORDS = frozenset({
-    "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
-    "minLength", "maxLength", "pattern", "minItems", "maxItems", "uniqueItems",
-    "minProperties", "maxProperties",
-})
-
-
-def _strip_unsupported(node: Any) -> Any:
-    if isinstance(node, dict):
-        return {
-            k: _strip_unsupported(v)
-            for k, v in node.items()
-            if k not in _UNSUPPORTED_SCHEMA_KEYWORDS
-        }
-    if isinstance(node, list):
-        return [_strip_unsupported(item) for item in node]
-    return node
-
-
-def strict_schema(model: type[BaseModel]) -> dict:
-    """JSON Schema for a Pydantic model, safe for strict structured outputs.
-
-    Constraints like a 0-1 bound are removed here and enforced when the
-    response is parsed instead, so an out-of-range value becomes a validation
-    error rather than a schema-compilation error.
-
-    Shared by every layer that asks a model for structured output — page
-    candidates, flow candidates, regression interpretations — because the set
-    of keywords providers reject is a property of the providers, not of any
-    one schema.
-    """
-    return _strip_unsupported(model.model_json_schema())
 
 
 def candidate_set_schema() -> dict:

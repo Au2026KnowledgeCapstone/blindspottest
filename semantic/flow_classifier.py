@@ -31,7 +31,7 @@ from typing import Iterable
 from discovery.graph import AppGraph
 from discovery.projections import summary
 from discovery.readable import summarize as summarize_readable
-from semantic.classifier import LLMBackend, backend_for
+from semantic.backends import LLMBackend, backend_for
 from semantic.flow_schemas import (
     FlowCandidate,
     FlowCandidateSet,

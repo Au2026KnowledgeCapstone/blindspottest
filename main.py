@@ -83,11 +83,13 @@ from reporting.reporter import (
 from runner.flow_runner import FlowRunner
 from runner.highlight import DEFAULT_DWELL_MS
 from runner.persistence_runner import PersistenceRunner
-from semantic.classifier import backend_for, classify, validate_candidates
+from semantic.backends import backend_for
 from semantic.flow_classifier import DEFAULT_PROVIDER as FLOW_PROVIDER
 from semantic.flow_classifier import classify_flows, validate_flow_candidates
 from semantic.flow_schemas import FlowCandidateSet
-from semantic.schemas import CandidateSet
+from semantic.page_classifier import DEFAULT_PROVIDER as PAGE_PROVIDER
+from semantic.page_classifier import classify, validate_candidates
+from semantic.page_schemas import CandidateSet
 
 DEFAULT_BASELINE_DIR = Path("runs/baseline")
 
@@ -501,7 +503,8 @@ def _editable_states(graph) -> list:
 def _run_pages(page, graph, args, console):
     """Classify and run page-level persistence tests across the application."""
     engine = KnowledgeEngine.load()
-    backend = backend_for(args.provider, args.model)
+    backend = backend_for(args.provider, args.model,
+                          default_provider=PAGE_PROVIDER)
 
     entries, records, verdicts, skipped_all = [], [], [], []
     counter = 1
@@ -825,7 +828,8 @@ def run_adhoc(args) -> int:
                     type("R", (), {"candidates": candidates, "rejected": rejected})()
                 )
             else:
-                backend = backend_for(args.provider, args.model)
+                backend = backend_for(args.provider, args.model,
+                                      default_provider=PAGE_PROVIDER)
                 console.analyzing(backend.model)
                 try:
                     classification = classify(snapshot, backend=backend)
