@@ -36,6 +36,7 @@ executable, serializable instances and turns observations into verdicts;
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -93,10 +94,54 @@ def _probe_declared(candidate, graph: AppGraph) -> bool:
     return candidate.probe is not None
 
 
+# Matched against an affordance key (`role|type|label`, e.g.
+# `combobox||sort by`). Word-anchored so "assortment" is not a sort control.
+_SORT_CONTROL = re.compile(r"\b(sort|order\s+by|orderby)\b")
+
+
+def _sort_established(candidate, graph: AppGraph) -> bool:
+    """The goal walk puts the collection into a chosen order.
+
+    An ordering relation over a walk that never sorted is unobservable in the
+    same way a deletion is without a probe: the collection renders in *some*
+    order regardless, so the invariant asserts over whatever order the
+    application happened to default to. That is not hypothetical. It is what
+    `ORDERING_CONSISTENCY` did to a candidate whose walk was a search filter
+    — the page was correctly name-ascending, the bound column was price, and
+    a correct application was reported as violating an invariant it was never
+    given the chance to satisfy.
+
+    Only a control counts, not the route. A state's `url_template` records
+    parameter *names* rather than values (`/catalog?q,sort`), so "the route
+    carries a sort" is equally true of the default-ordered page, and a check
+    written against the template would admit exactly the candidate this
+    predicate exists to reject. Whether a value is the application's default
+    is not knowable from the map, so what is asked here is the question the
+    map can answer: did the walk set the control.
+
+    Conservative by construction. A sort established some other way — a
+    column header whose label does not say so — reads as unmet and the
+    capability is reported as a gap. An honest gap is worth more than a
+    confident verdict on an unsorted collection.
+    """
+    setup = candidate.setup_state_id or graph.entry
+    walk = graph.path_between(setup, candidate.goal_state_id)
+    if not walk:
+        return False
+    for action in walk:
+        if any(_SORT_CONTROL.search(str(name).lower())
+               for name, _ in action.inputs):
+            return True
+        if _SORT_CONTROL.search(action.affordance_key.lower()):
+            return True
+    return False
+
+
 FLOW_REQUIREMENT_PREDICATES: dict[str, FlowPredicate] = {
     "goal_reachable": _goal_reachable,
     "goal_differs_from_setup": _goal_differs_from_setup,
     "probe_declared": _probe_declared,
+    "sort_established": _sort_established,
 }
 
 

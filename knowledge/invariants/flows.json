@@ -41,7 +41,8 @@
       ],
       "requirements": [
         "goal_reachable",
-        "goal_differs_from_setup"
+        "goal_differs_from_setup",
+        "sort_established"
       ],
       "bindings": [
         "row_values"
