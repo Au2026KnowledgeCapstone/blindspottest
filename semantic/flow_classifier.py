@@ -97,21 +97,26 @@ when the page states a count, `stated_count` (number).
       create_resource        : `resource_present` (visible, something \
 identifying the new resource).
       session_termination    : no bindings needed; use a probe.
-      authenticate           : `signed_in` (visible, evidence the session is \
-active).
+      authenticate           : no bindings needed; use a probe. Evidence on \
+the page that the session is active is exactly what can be rendered without \
+a session actually existing.
     Choose selectors from the READABLE VALUES you were given. A selector \
 matching several elements is correct for a collection and wrong for a single \
 total — the match count tells you which you have.
 
   probe             a request to make AFTER the capability runs, to test \
-whether something still exists. This is the only way to check a condition \
-about something NOT existing.
+whether something exists — or has stopped existing — in the session the flow \
+left behind. This is the only way to check a condition the page itself can \
+claim either way without it being true.
       delete_resource      : {"mode": "captured", "path": ""} — re-request \
 the resource's own URL, which the system captures before the deletion.
       session_termination  : {"mode": "path", "path": "/the-protected-path"} \
 — the page that should stop being reachable once signed out.
       create_resource      : {"mode": "final", "path": ""} — re-request the \
 URL the flow ended on.
+      authenticate         : {"mode": "final", "path": ""} — re-request the \
+URL the sign-in landed on, which should still be served now the session \
+exists.
       anything else        : null.
 
   applicability_confidence  0-1, how strongly the map supports "this \

@@ -177,6 +177,35 @@
       "teardown": [
         "reset_session"
       ]
+    },
+    {
+      "id": "AUTHENTICATION_GRANTS_ACCESS",
+      "name": "Authentication Grants Access Invariant",
+      "description": "After signing in with valid credentials, a protected resource must be reachable in that session. The sign-in can report success at every observable step and still leave the session unestablished, which is only detectable by asking for the protected page. This is the converse of SESSION_TERMINATION and shares its shape: the claim is about a session, so only a probe can settle it.",
+      "applies_to": [
+        "authenticate"
+      ],
+      "requirements": [
+        "goal_reachable",
+        "goal_differs_from_setup",
+        "probe_declared",
+        "credentials_submitted"
+      ],
+      "bindings": [],
+      "procedure": [
+        "walk_setup",
+        "walk_goal",
+        "probe"
+      ],
+      "precondition": "goal_reached == true",
+      "expected_relation": "probe_reachable == true",
+      "on_violation": {
+        "severity": "high",
+        "summary": "A protected resource is unreachable after a sign-in that reported success; the credentials were accepted but no session was established."
+      },
+      "teardown": [
+        "reset_session"
+      ]
     }
   ]
 }

@@ -1,10 +1,14 @@
-"""The `sort_established` requirement, and the false positive it closes.
+"""Requirements that assert the walk established what the relation presumes.
 
 flow-007 was a real run against the sound build: its walk was a search
 filter, the catalog rendered correctly name-ascending, the candidate bound
 the price column, and `sorted_asc(row_values)` reported a violation against
 an application that was right. The capability was never exercised — nothing
 in the walk sorted anything — and no gate noticed.
+
+`sort_established` and `credentials_submitted` both close that shape: the
+first for an ordering relation over an unsorted collection, the second for
+an access probe in a session the goal walk did not establish.
 
 No browser, no LLM, no credentials.
 """
@@ -51,8 +55,9 @@ def apply_filters(*inputs: tuple[str, str]) -> Action:
 class Candidate:
     """Only the attributes a flow requirement predicate reads."""
 
-    def __init__(self, *, setup=CATALOG, goal=FILTERED, probe=None, bindings=()):
-        self.capability = FlowCapability.SORT_COLLECTION
+    def __init__(self, *, setup=CATALOG, goal=FILTERED, probe=None, bindings=(),
+                 capability=FlowCapability.SORT_COLLECTION):
+        self.capability = capability
         self.setup_state_id = setup
         self.goal_state_id = goal
         self.probe = probe
@@ -152,6 +157,110 @@ class RuleBase(unittest.TestCase):
 
         for inv in engine.invariants_for(FlowCapability.SORT_COLLECTION.value):
             self.assertEqual(inv.unmet_requirements(candidate, g), [], inv.id)
+
+
+PASSWORD_FIELD = "textbox|password|password"
+USERNAME_FIELD = "textbox|text|username"
+
+
+def credentials_submitted(candidate, g) -> bool:
+    return FLOW_REQUIREMENT_PREDICATES["credentials_submitted"](candidate, g)
+
+
+def sign_in(*inputs: tuple[str, str]) -> Action:
+    return Action(
+        source=CATALOG,
+        target=FILTERED,
+        affordance_key="button|submit|sign in",
+        label="Sign in",
+        inputs=tuple(inputs),
+    )
+
+
+class CredentialsSubmitted(unittest.TestCase):
+    def test_a_credential_submission_establishes_a_session(self):
+        g = graph(sign_in((USERNAME_FIELD, "demo"), (PASSWORD_FIELD, "demo123")))
+        self.assertTrue(credentials_submitted(Candidate(), g))
+
+    def test_reaching_an_authenticated_page_is_not_enough(self):
+        """The failure this exists to prevent: the setup walk may have signed
+        in on its way to the setup state, so the probe answers 'reachable'
+        however little the goal walk did. A navigation with no credentials in
+        it is not an authentication."""
+        g = graph(
+            Action(
+                source=CATALOG,
+                target=FILTERED,
+                affordance_key="link||account",
+                label="Account",
+            )
+        )
+        self.assertFalse(credentials_submitted(Candidate(), g))
+
+    def test_a_username_alone_is_not_a_credential_submission(self):
+        g = graph(sign_in((USERNAME_FIELD, "demo")))
+        self.assertFalse(credentials_submitted(Candidate(), g))
+
+    def test_the_type_segment_is_what_counts(self):
+        """A password input declares itself in the key's type segment
+        whatever the field is labelled, which is why the key is matched
+        whole rather than the label alone."""
+        g = graph(sign_in(("textbox|password|secret phrase", "demo123")))
+        self.assertTrue(credentials_submitted(Candidate(), g))
+
+    def test_an_unreachable_goal_is_unmet(self):
+        self.assertFalse(credentials_submitted(Candidate(), graph()))
+
+
+class AuthenticationGrantsAccess(unittest.TestCase):
+    class Probe:
+        path = "/account"
+
+    def invariant(self):
+        engine = FlowEngine.load()
+        found = [
+            inv
+            for inv in engine.invariants_for(FlowCapability.AUTHENTICATE.value)
+            if inv.id == "AUTHENTICATION_GRANTS_ACCESS"
+        ]
+        self.assertTrue(found, "AUTHENTICATION_GRANTS_ACCESS is not loaded")
+        return found[0]
+
+    def test_authenticate_is_no_longer_a_coverage_gap(self):
+        engine = FlowEngine.load()
+        self.assertTrue(engine.invariants_for(FlowCapability.AUTHENTICATE.value))
+
+    def test_it_requires_both_a_probe_and_a_credential_submission(self):
+        """A probe alone proves the page is reachable, not that this flow is
+        why — and credentials alone cannot settle a claim about a session."""
+        requirements = self.invariant().requirements
+        self.assertIn("probe_declared", requirements)
+        self.assertIn("credentials_submitted", requirements)
+
+    def test_it_asserts_the_converse_of_session_termination(self):
+        inv = self.invariant()
+        self.assertEqual(inv.expected_relation.source, "probe_reachable == true")
+
+    def test_a_sign_in_walk_with_a_probe_meets_every_requirement(self):
+        g = graph(sign_in((USERNAME_FIELD, "demo"), (PASSWORD_FIELD, "demo123")))
+        candidate = Candidate(capability=FlowCapability.AUTHENTICATE,
+                              probe=self.Probe())
+        self.assertEqual(self.invariant().unmet_requirements(candidate, g), [])
+
+    def test_a_navigation_walk_is_skipped_with_the_reason_named(self):
+        engine = FlowEngine.load()
+        g = graph(
+            Action(source=CATALOG, target=FILTERED,
+                   affordance_key="link||account", label="Account")
+        )
+        candidate = Candidate(capability=FlowCapability.AUTHENTICATE,
+                              probe=self.Probe())
+
+        instances, skipped = engine.instantiate([candidate], g)
+
+        self.assertEqual(instances, [])
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("credentials_submitted", skipped[0].unmet)
 
 
 if __name__ == "__main__":

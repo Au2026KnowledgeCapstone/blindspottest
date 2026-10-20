@@ -123,13 +123,20 @@ class NoInvariantIsReported(unittest.TestCase):
             self.assertTrue(skipped[0].unmet[0].strip())
 
     def test_skip_reason_comes_from_the_definitions(self):
+        """The capability is taken from the rule base rather than named, so
+        this keeps testing the no-invariant path as invariants are added.
+        Naming one meant the test broke the day `authenticate` gained an
+        invariant — and it broke by crashing on `graph=None`, which only the
+        no-invariant path is allowed to be passed."""
         engine = FlowEngine.load()
+        gaps = unsupported()
+        self.assertTrue(gaps, "no uncovered capability left to test with")
+        name = sorted(gaps)[0]
+
         _, skipped = engine.instantiate(
-            [self.Stub(FlowCapability.AUTHENTICATE)], graph=None
+            [self.Stub(FlowCapability(name))], graph=None
         )
-        self.assertEqual(
-            skipped[0].unmet[0], unsupported()["authenticate"]
-        )
+        self.assertEqual(skipped[0].unmet[0], gaps[name])
 
 
 class StrictSchemas(unittest.TestCase):

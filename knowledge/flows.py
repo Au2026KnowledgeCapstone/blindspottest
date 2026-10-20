@@ -137,11 +137,46 @@ def _sort_established(candidate, graph: AppGraph) -> bool:
     return False
 
 
+# Matched against an affordance key (`role|type|label`, e.g.
+# `textbox|password|password`). The type segment is what makes this reliable:
+# a password input declares itself, whatever the field is labelled.
+_CREDENTIAL_FIELD = re.compile(r"\b(password|passcode)\b")
+
+
+def _credentials_submitted(candidate, graph: AppGraph) -> bool:
+    """The goal walk proves who the user is.
+
+    Required by invariants whose goal condition is that access was *granted*.
+    Reaching an authenticated page is not evidence that this flow
+    authenticated: the setup walk may have signed in on its way to the setup
+    state, leaving the session already established before the goal walk runs.
+    The probe would then answer `reachable` no matter what the goal walk did,
+    and the invariant would report a confident pass on a capability it never
+    exercised — the same failure `sort_established` exists to prevent.
+
+    What this does not establish is that the resource was *unreachable*
+    beforehand. That needs an observation taken before the goal walk, which
+    the step vocabulary cannot currently express, so a flow that signs in
+    while already signed in still passes. The weaker claim is worth making:
+    it rules out the case where nothing resembling a sign-in happened at all.
+    """
+    setup = candidate.setup_state_id or graph.entry
+    walk = graph.path_between(setup, candidate.goal_state_id)
+    if not walk:
+        return False
+    return any(
+        _CREDENTIAL_FIELD.search(str(name).lower())
+        for action in walk
+        for name, _ in action.inputs
+    )
+
+
 FLOW_REQUIREMENT_PREDICATES: dict[str, FlowPredicate] = {
     "goal_reachable": _goal_reachable,
     "goal_differs_from_setup": _goal_differs_from_setup,
     "probe_declared": _probe_declared,
     "sort_established": _sort_established,
+    "credentials_submitted": _credentials_submitted,
 }
 
 

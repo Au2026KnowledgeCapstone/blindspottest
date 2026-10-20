@@ -76,9 +76,8 @@
         "signing out (that is session_termination)",
         "a form that merely collects contact details during checkout"
       ],
-      "outcome": "Evidence the session is active is readable after the flow.",
-      "supported": false,
-      "gap": "No flow invariant asserts this yet. Candidates are reported as a coverage gap. Note the crawler already signs in via --credential to reach authenticated states, so this capability is about *asserting* the sign-in, not about reaching the pages behind it."
+      "outcome": "A protected resource is reachable in the session the flow established, which a probe settles.",
+      "supported": true
     },
 
     "session_termination": {

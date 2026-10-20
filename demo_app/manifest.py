@@ -65,7 +65,7 @@ FLOWS = [
             "invalid credentials do not",
             "after signing out the protected resource is unreachable again",
         ],
-        "invariants": ["SESSION_TERMINATION (not yet in the rule base)"],
+        "invariants": ["SESSION_TERMINATION", "AUTHENTICATION_GRANTS_ACCESS"],
         "defect": {
             "url": "/broken/account",
             "summary": "Sign out shows the confirmation and returns to the "
@@ -86,7 +86,7 @@ FLOWS = [
             "it appears in the collection",
             "its fields hold what was submitted",
         ],
-        "invariants": ["CREATION_VISIBILITY (not yet in the rule base)"],
+        "invariants": ["CREATION_VISIBILITY"],
         "defect": None,
     },
     {
@@ -100,7 +100,7 @@ FLOWS = [
             "the resource is no longer reachable at its own URL",
             "the collection's stated count matches the rows it shows",
         ],
-        "invariants": ["DELETION_COMPLETENESS (not yet in the rule base)"],
+        "invariants": ["DELETION_COMPLETENESS", "COLLECTION_COUNT_AGREEMENT"],
         "defect": {
             "url": "/broken/projects",
             "summary": "Delete is a soft delete: the row disappears and the "
@@ -122,7 +122,7 @@ FLOWS = [
             "the chosen sort order holds across consecutive rows",
             "clearing the filters returns the full collection",
         ],
-        "invariants": ["ORDERING_CONSISTENCY (not yet in the rule base)"],
+        "invariants": ["ORDERING_CONSISTENCY", "COLLECTION_COUNT_AGREEMENT"],
         "defect": {
             "url": "/broken/catalog?sort=price-asc",
             "summary": "The price sort orders by the rendered string, so "
@@ -148,7 +148,7 @@ FLOWS = [
             "the total equals the sum of the lines shown",
             "an order number is issued",
         ],
-        "invariants": ["TOTAL_CONSISTENCY (not yet in the rule base)"],
+        "invariants": ["TOTAL_CONSISTENCY"],
         "defect": {
             "url": "/broken/cart",
             "summary": "A protection plan added at the upsell step is listed "
