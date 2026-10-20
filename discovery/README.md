@@ -1,3 +1,8 @@
+---
+layout: default
+title: Discovery
+---
+
 # Discovery
 
 Maps what an application exposes — states, the actions that connect them, and

@@ -1,3 +1,8 @@
+---
+layout: default
+title: Knowledge
+---
+
 # Knowledge
 
 Decides whether what an application did was *correct*. Discovery answers "what

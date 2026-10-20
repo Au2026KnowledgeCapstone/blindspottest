@@ -1,3 +1,8 @@
+---
+layout: default
+title: BlindSpotTest
+---
+
 ### How it works 
 
 The page inspector simplifies the DOM, sends it to the classifier, in which AI will decide which elements to test, which sends it to the knowledge engine that will extract the property type and find the invarient (preloaded), it will then send the property type and invarient to the test generator, which will generate the test and send it to the test runner, which will run the test and send the result back to the knowledge engine, which will go to the reporter.
