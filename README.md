@@ -128,6 +128,15 @@ knowledge   observations -> verdicts   (rule base)
 baseline    graph + surface + instances + verdicts -> disk
 ```
 
+Page-level tests are a second, **currently unused** branch of the same
+pipeline. `--with-pages` classifies every state holding an editable text field
+and runs the persistence invariants against it, but no Makefile target passes
+the flag, so every baseline recorded so far holds flow tests only
+(`page_tests: 0`). The replay half is built and waiting — a recorded page test
+is rebuilt and run exactly like a flow one — which makes this an omission in
+what gets recorded, not a missing capability. See "What the page pipeline does
+with it" below for which planted defect that leaves undetected.
+
 ### Pipeline 2 — detect regressions
 
 ```bash
@@ -246,6 +255,17 @@ That was the gap. `make baseline` and `make regression` close it — the flow
 runner verifies arrival against the state the graph predicted, so a walk that
 ends somewhere unexpected says so instead of quietly reading the wrong page.
 `make edit` is kept as the live demonstration of the original problem.
+
+**The profile defect is the one gap this leaves.** It is a persistence bug, so
+only the page-level invariants can catch it — and because `make baseline` does
+not pass `--with-pages`, no baseline records a page test, so `make regression`
+does not look for it. `make demo` finds it on demand; the regression pipeline
+does not. Worse, nothing currently says so: the baseline's coverage block
+reports `behavioral: true` and a `skipped` list naming only capabilities with
+no invariant, so a reader cannot distinguish "page-level held" from "page-level
+was never attempted". Closing it is a flag plus a coverage field plus a
+`regression/differ.py` finding — the first planted defect in the table above is
+the acceptance test for whether it worked.
 
 ### Ground truth
 

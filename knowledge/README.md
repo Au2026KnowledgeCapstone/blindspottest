@@ -75,6 +75,13 @@ not filename**: `FlowEngine.load` takes only files with `"kind": "flow"`
 absent to `"page"`. So each loader skips the other's rule base instead of
 choking on a perfectly valid rule it does not understand.
 
+> **The page invariants are loaded but never recorded.** Both are mature and
+> assert something real, but running them requires `--with-pages`, which no
+> Makefile target passes (`main.py:622`), so no baseline holds a page test.
+> That is an orchestration gap rather than a rule-base one — see the root
+> `README.md` — but it is worth knowing before concluding from this document
+> that `PERSISTENCE_001` runs.
+
 ## The four columns
 
 Both engines are built on the identical mapping. Read this table first; the
