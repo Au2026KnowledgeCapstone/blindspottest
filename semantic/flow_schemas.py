@@ -52,6 +52,7 @@ class FlowCapability(str, Enum):
     UPDATE_RESOURCE = "update_resource"
     DELETE_RESOURCE = "delete_resource"
     AUTHENTICATE = "authenticate"
+    ACCESS_CONTROL = "access_control"
     SESSION_TERMINATION = "session_termination"
     SORT_COLLECTION = "sort_collection"
     FILTER_COLLECTION = "filter_collection"
@@ -72,6 +73,12 @@ class ExtractKind(str, Enum):
     TEXTS = "texts"      # every match's visible text, as a list of strings
     NUMBER = "number"    # the first match's text, parsed as a number
     NUMBERS = "numbers"  # every match's text, parsed as a list of numbers
+    CHECKED = "checked"
+    SELECTED = "selected"
+    ENABLED = "enabled"
+    NUMERIC_VALID = "numeric_valid"
+    NUMERIC_VALUE = "numeric_value"
+    NUMERIC_VALUES = "numeric_values"
     COUNT = "count"      # how many elements match, as an integer
     VALUE = "value"      # the first match's form value
     VISIBLE = "visible"  # whether at least one match is visible, as a bool
@@ -87,6 +94,8 @@ class ObservationBinding(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid")
+
+    frame: str | None = None
 
     name: str = Field(
         description="The observation name, e.g. 'line_totals' or "

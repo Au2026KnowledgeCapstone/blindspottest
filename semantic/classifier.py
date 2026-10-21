@@ -156,7 +156,7 @@ class AnthropicBackend:
         if self._client is None:
             import anthropic
 
-            self._client = anthropic.Anthropic()
+            self._client = anthropic.Anthropic(max_retries=0)
         return self._client
 
     def complete_json(self, *, system: str, user: str, schema: dict) -> str:
@@ -171,6 +171,11 @@ class AnthropicBackend:
             messages=[{"role": "user", "content": user}],
             output_config=output_config,
         )
+
+        usage = getattr(response, 'usage', None)
+        self.last_usage = usage.model_dump(mode='json') if usage else None
+        if response.stop_reason == 'max_tokens':
+            raise RuntimeError('model output reached its token limit; no automatic retry')
 
         # Safety classifiers can decline a request; content is then empty or
         # partial, so check before indexing into it.
@@ -209,7 +214,7 @@ class OpenAIBackend:
                     "the openai package is not installed — "
                     "run: .venv/bin/pip install openai"
                 ) from None
-            self._client = openai.OpenAI()  # reads OPENAI_API_KEY
+            self._client = openai.OpenAI(max_retries=0)  # reads OPENAI_API_KEY
         return self._client
 
     def complete_json(self, *, system: str, user: str, schema: dict) -> str:
@@ -219,6 +224,7 @@ class OpenAIBackend:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
+            max_completion_tokens=self.max_tokens,
             response_format={
                 "type": "json_schema",
                 "json_schema": {
@@ -228,7 +234,11 @@ class OpenAIBackend:
                 },
             },
         )
+        usage = getattr(response, 'usage', None)
+        self.last_usage = usage.model_dump(mode='json') if usage else None
         choice = response.choices[0]
+        if choice.finish_reason == 'length':
+            raise RuntimeError('model output reached its token limit; no automatic retry')
         # Strict mode can still refuse; the refusal arrives in its own field
         # rather than as an exception.
         refusal = getattr(choice.message, "refusal", None)

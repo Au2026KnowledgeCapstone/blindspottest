@@ -128,7 +128,7 @@ baseline    graph + surface + instances + verdicts -> disk
 ```bash
 baseline    load the recorded instances
 runner      replay them verbatim against the new build   (no LLM, no re-classification)
-regression  diff verdicts, observations, structure, UI   (deterministic)
+regression  diff verdicts and observations; structure/UI with --recrawl
 regression  explain what the diff means                  (LLM)
 reporting   regressions first, then fixes, then the rest
 ```
@@ -139,6 +139,141 @@ both runs assert exactly the same thing and a difference in the answers is a
 difference in the application. Re-classifying on each run would compare two
 different test suites and blame the code. It is also why a regression run
 calls no LLM for classification and is cheap enough to run per build.
+
+### Regression replay and discovery
+
+`--regression` now replays the saved suite without crawling. Use `--recrawl`
+to also compare discovered structure and UI, or `--discover-only` to record
+a discovery baseline without running flow tests. `--replay-only` explicitly
+selects the default regression behavior. Reports state which comparisons ran;
+an empty replay suite exits with an execution/coverage error.
+
+Results separate execution health, expectation correctness, and comparison
+status. Missing selectors, ambiguous controls, failed setup, and unverified
+goals remain inconclusive. Rule, contract, fixture, evaluator, and identity
+policy changes make tests noncomparable rather than product regressions.
+Baseline schema 1.2 stores this evidence while older schemas remain readable.
+
+Contracts support versioned independent `checks` (an ID, relation, and typed
+bindings), per-action readiness, cleanup assertions, frame selectors, and
+checked/selected/enabled observations. Numeric predicates distinguish finite
+values, nonnegative amounts, and positive integer quantities from arithmetic
+consistency. These checks need applicable, scoped bindings; discovery alone
+cannot prove the intended business policy. Initial-load, setup, goal, and reload-verification JavaScript errors fail
+the default runtime check; set `runtime_errors: record` to retain evidence
+without asserting that policy. An explicit `goal_path` requires readiness
+assertions; otherwise replay verifies the recorded state fingerprint.
+
+Discovery prioritizes form and capability actions and delays repeated carousel
+navigation. `--max-attempts` (default 2000) includes failed actions and
+`--crawl-seconds` (default 120) bounds scheduling time. Zero disables each
+budget; an in-flight browser operation can extend the deadline. Repeated
+restoration failures suppress further attempts and remain unexplored coverage.
+Graph metrics include attempts, restoration/action time, and stop reason.
+Use repeated `--id-segment-pattern REGEX` options only for known interchangeable
+route IDs; real navigation URLs remain intact and the policy is frozen for replay.
+
+### Crawl checkpoints and resume
+
+Discovery now saves an atomic crawl journal automatically and prints its path.
+The journal includes the graph, pending and interrupted task, actual action
+recipes, browser cookies/local storage/IndexedDB, session storage, observations,
+input choices, and failure history. Journal files are private (`0600`) because
+form inputs and sessions can contain credentials. Immutable snapshots live in a
+private adjacent `<journal>.data/` directory and are written once per state.
+Keep that directory with the journal when copying or resuming a run; published
+baseline graph files remain standalone.
+
+```bash
+# Start a bounded discovery run with a named journal.
+.venv/bin/python main.py http://localhost:3000 --discover-only \
+  --baseline-dir runs/discovery-partial --crawl-checkpoint runs/crawl.json \
+  --max-attempts 100
+
+# Resume into a fresh baseline directory; existing baselines remain immutable.
+.venv/bin/python main.py http://localhost:3000 --discover-only \
+  --baseline-dir runs/discovery-resumed --resume-crawl runs/crawl.json \
+  --max-attempts 500 --retry-crawl-failures
+```
+
+Resume requires the same target, entry path, credentials, and exploration policy.
+Attempt, action, and time budgets apply to each resumed session; the state limit
+applies to the accumulated map. Ctrl-C and CLI termination preserve the active
+task for retry. `--retry-crawl-failures` additionally requeues failed actions and
+resets restoration suppression. It does not retry controls excluded by policy.
+
+Restoration first verifies the current state, then tries saved browser data at
+the recorded URL. If navigation changes that data or the controls, it replays
+the actual action recipe from the entry, including removal actions. Recipes
+use observed transitions rather than inferred navigation. Browser checkpoints
+do not roll back server databases or external side effects; those applications
+still need a reproducible server fixture. Contexts restored by the built-in
+checkpoint mechanism use default browser options.
+
+Discovery tries individual offered dropdown values, radio choices, and both
+checkbox states. Selected values contribute to state identity, allowing a
+following Continue action to explore the corresponding branch. Repeated choices
+are grouped by structural state and control; arbitrary text values and the full
+Cartesian product of controls are not exhaustively generated. `--no-input-choices`
+disables these branches and reports their coverage gap. Custom widgets,
+multi-select combinations, and uninspected same-origin frames remain explicit
+gaps. An exhausted queue alone does not imply a closed graph.
+
+Progress messages show states, queued tasks, attempts, and time spent restoring
+versus acting. Saved metrics distinguish walked transitions, inferred navigation,
+failed restoration, suppressed actions, and unsupported controls. To combine
+maps without counting shared states/edges twice:
+
+```bash
+.venv/bin/python -m discovery.coverage runs/admin/graph.json \
+  runs/customer/graph.json --out runs/combined-graph.json
+```
+
+Maps must share a target and identity policy. Pending counts remain per-source
+data; shared queues cannot be deduplicated from graph files alone.
+
+### Outcome and readiness configuration
+
+Select/check actions now honor the runner's settle interval. Saved path steps
+can also carry `ready` assertions; `--crawl-readiness readiness.json` applies a
+JSON array of UI assertions after discovery transitions. Use an application
+readiness signal when asynchronous updates can outlast a fixed delay.
+
+The additional `STOCK_LIMIT` and `LINE_TOTAL_CONSISTENCY` rules require explicit
+bindings. `numeric_value` reads a single input/select value or displayed amount;
+`numeric_values` reads a set of these, enabling `product(line_factors) == line_total`.
+This avoids parsing all the option labels as a selected quantity. Numeric label
+parsing now distinguishes `Subtotal (1 items)` from accounting amounts such as
+`($600)`.
+
+Contracts can provide `reload_checks` and `reload_ready` to verify persistence
+after reload. For removal, a check such as `remaining_items == 0` bound to the
+cart rows is recorded separately as `RELOAD/<check-id>`; missing evidence remains
+inconclusive. Reload changes the page used by subsequent cleanup, so cleanup
+selectors must also work there.
+
+Runtime evidence retains the phase, URL, and message. A reviewed
+`runtime_error_rules` entry can mark a specific pattern as record-only with
+explicit `phases` and a required `reason`. No PayPal/SDK errors are automatically
+ignored. Cleanup errors are recorded separately from the default runtime check.
+Evaluator version `relations-3` prevents comparisons with results produced under
+the previous runtime policy from being called product regressions.
+
+Run the deterministic browser benchmark without an LLM:
+
+```bash
+make test
+make regression-benchmark BENCHMARK_OUTPUT=runs/my-regression-check
+```
+
+Choose a fresh output directory because baselines are immutable. The benchmark
+records a reviewed local fixture suite, reloads it from disk, and replays five
+cases against working and deliberately broken builds: quantities, NaN amounts,
+payment selection, anonymous runtime errors, and rendered error messages.
+Reports group findings by test and include execution health, observations,
+screenshots, and Playwright traces. CI runs the suite and uploads benchmark
+evidence. Fixture checks validate the engine; application coverage still depends
+on the flows and expectations recorded for that application.
 
 ### What made flows work
 
@@ -251,13 +386,114 @@ eyeballed. Nothing in the app reads it, and no page links to it.
 
 State is per browser session (a cookie) and the two builds keep separate copies,
 so two scans never collide, and `POST /reset` puts a session back to the seed.
+## Model budgets and resumable generation
+
+Every CLI model stage shares a durable budget: classification, flow expectation
+generation, optional page classification, and report interpretation. Defaults:
+
+| Limit | Default |
+| --- | --- |
+| Attempted requests | 5 |
+| Total token reservations | 100,000 |
+| Input reservation per request | 30,000 |
+| Maximum output tokens per request | 6,000 |
+| SDK automatic retries | Disabled |
+
+Use `--max-model-calls`, `--max-model-tokens`, `--max-model-input-tokens`,
+`--max-model-output-tokens`, and `--model-journal` to configure these limits.
+Input reservations use UTF-8 bytes of the request text/schema plus framing
+allowance, rather than an exact provider tokenizer. Each attempt reserves that
+input allowance plus its maximum output tokens. Reservations remain charged,
+including failures and interrupted requests. They are conservative spending
+controls, not dollar quotes or exact reported token usage. Provider-reported
+usage is retained in the journal when available. Oversized inputs are refused
+before a request is sent.
+
+The default journal is `RUNS_DIR/model-budget.sqlite3`. Responses are saved
+immediately and reused for exact matching requests on resume. SQLite transactions
+prevent two concurrent processes sharing a journal from exceeding its request
+limit. Unknown outcomes after interruptions are blocked instead of retried.
+Even invalid model output is cached; it does not trigger another paid attempt.
+Built-in OpenAI and Anthropic adapters disable SDK retries and pass output-token
+caps to their APIs. Custom registered adapters must honor their `max_tokens`
+setting and disable any internal retries to provide the same guarantees.
+
+For a bounded baseline batch:
+
+```sh
+.venv/bin/python main.py --baseline http://localhost:3000 \
+  --baseline-dir runs/baselines/batch-1 --runs-dir runs/amazon-batches \
+  --model-journal runs/amazon-batches/calls.sqlite3 \
+  --max-model-calls 5 --max-model-tokens 100000 \
+  --save-flow-candidates runs/amazon-batches/flows.json
+```
+
+Flow classification consumes one request unless supplied from a file. The
+remaining allowance is shared by expectation generation and other enabled model
+stages. Each completed flow is written to `RUNS_DIR/expectation-progress.json`.
+Budget-limited flows appear as explicit coverage gaps; an optional interpretation
+skipped for budget reasons leaves the deterministic regression report intact.
+A summary is written to `RUNS_DIR/model-budget-summary.json`.
+
+To continue, reuse the **same journal**, provider/model, prompts, output cap, and
+discovery evidence, and explicitly raise cumulative limits (for example,
+`--max-model-calls 10 --max-model-tokens 200000`). Record into a new baseline
+directory if the previous batch already published a baseline. Saved
+classifications can be supplied with `--flow-candidates` or `--identified-flows`.
+Completed requests come from the journal, and only missing requests use the new
+allowance. Evidence or prompt changes create different requests and count again.
+Changing journals starts a separate budget; it is not a way to resume the old
+allowance. A failed/interrupted exact request requires deliberate investigation
+and a new journal before it can be attempted again.
+
+`--max-model-calls 0` prevents new requests while permitting cached ones. Saved
+baseline replay with `--no-interpret` requires neither a model request nor a
+model journal. Discovery-only runs also make no model calls.
+
 ## Behavior contracts and evidence-based regression
 
-Flow baselines now save an explicit behavior contract inside each test instance.
-Discovery proposes the capability, observation bindings, evidence, assumptions,
-and an inferred expectation from `knowledge/capability_models.json` and the
-existing invariant rules. A capability is a hypothesis about behavior, not proof
-of the application's requirements.
+Flow baselines now generate intended behaviors with an AI model **after** flow
+classification. Classification itself is unchanged. The model receives each
+identified flow, its observed paths, controls, readable values, and observation
+timeline. It proposes evidence-backed expected outcomes and declarative checks,
+including comparisons across steps, rather than treating the observed behavior
+as the expected result. For example, a quantity selected before adding an item
+should match the quantity displayed in the cart.
+
+Selectors, states, observation timing, operand names, and expressions are
+validated before execution. Readiness values are checked without coercion:
+`visible`, `checked`, and `enabled` require booleans; `count` requires a
+nonnegative integer; `text` and `value` require strings. Generated relations
+must compare compatible extractor representations. Numeric reductions require
+compatible inputs, and ordered comparisons require numbers. Malformed checks
+in a saved expectation suite become coverage gaps while valid checks remain
+usable; their values are never silently corrected. Unsupported or uncertain expectations become explicit
+coverage gaps. Executed expectations remain **inferred** until reviewed; an AI
+confidence score does not establish the application's business requirements.
+The browser runner collects values at the specified steps, evaluates the frozen
+relation, and records observation evidence and errors.
+
+Use `--save-expectations runs/expectations.json` when creating a baseline to
+export the generated suite. The baseline also stores `expectations.json` and
+freezes each test's expectation, evidence, model, prompt version, observation
+schedule, and discovery hash. Replay uses these saved expectations without
+another generation call. Use `--expectations runs/expectations.json` to reuse a
+suite with matching discovery evidence, or create a new baseline to regenerate.
+Changed evidence requires explicit regeneration. `--expectation-confidence`
+sets the execution threshold (default `0.7`). Generation failures stop the run;
+there is no silent fallback to fixed rules. `--expectation-mode rules` explicitly
+selects the previous rule-based implementation.
+
+An upstream classifier can instead supply `--identified-flows flows.json`:
+
+```json
+{"flows": [{"id": "checkout", "name": "Checkout", "setup_state_id": "s_start",
+  "goal_state_id": "s_confirmation", "evidence": "Observed checkout transitions"}]}
+```
+
+Use real discovery state IDs; paths must consist of observed actions. This input
+adapter does not change classification. Existing `--flow-candidates` files also
+work with AI expectation generation.
 
 Export these proposals while recording an exploratory baseline:
 
@@ -265,6 +501,7 @@ Export these proposals while recording an exploratory baseline:
 .venv/bin/python main.py --baseline http://localhost:3000 \
   --exclude /broken --baseline-dir runs/baselines/exploratory \
   --save-flow-candidates runs/candidates.json \
+  --save-expectations runs/expectations.json \
   --export-contracts runs/contracts.json
 ```
 
@@ -279,14 +516,15 @@ confidence score cannot confirm it. Then record a separate reviewed baseline:
 ```sh
 .venv/bin/python main.py --baseline http://localhost:3000 \
   --exclude /broken --baseline-dir runs/baselines/reviewed-v1 \
-  --flow-candidates runs/candidates.json --contracts runs/contracts.json
+  --flow-candidates runs/candidates.json --expectations runs/expectations.json \
+  --contracts runs/contracts.json
 
 .venv/bin/python main.py --regression http://localhost:3000/broken \
   --baseline-dir runs/baselines/reviewed-v1 --no-interpret
 ```
 
 Contracts bind to generated test IDs and verify capability/invariant identity.
-IDs are currently sequential, so recheck exported contracts after rediscovery;
+AI test IDs derive from the flow and expectation IDs. Recheck exported contracts after rediscovery;
 contracts are not automatically transferred across changed suites. Overrides
 are baseline-only: regression uses the saved contract and saved relation rather
 than the current rule file. Ordinary fields and selectors remain fixed during

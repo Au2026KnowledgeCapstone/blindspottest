@@ -328,3 +328,8 @@ clean:  ## Remove caches and run records
 .PHONY: test
 test:  ## Run deterministic behavior-contract, browser, and CLI tests (no LLM)
 	$(PY) -m unittest discover -s tests -v
+
+BENCHMARK_OUTPUT ?= runs/regression-benchmark
+.PHONY: regression-benchmark
+regression-benchmark:  ## Replay controlled working/broken builds without an LLM
+	$(PY) -m benchmarks.regression --output $(BENCHMARK_OUTPUT)

@@ -50,6 +50,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from datetime import datetime, timezone
 
 from baseline import loader as baseline_loader
 from baseline import saver as baseline_saver
@@ -61,7 +62,7 @@ from discovery.readable import readable_with_page
 from discovery.stability import DEFAULT_GAP_MS, DEFAULT_READS
 from knowledge.engine import KnowledgeEngine, Status
 from knowledge.flows import FlowEngine, evaluate_instance
-from knowledge.contracts import load_contracts, apply_contract
+from knowledge.contracts import load_contracts, apply_contract, UIAssertion
 from regression.differ import diff
 from regression.interpreter import interpret
 from regression.interpreter import DEFAULT_PROVIDER as INTERPRET_PROVIDER
@@ -88,6 +89,7 @@ from semantic.flow_classifier import DEFAULT_PROVIDER as FLOW_PROVIDER
 from semantic.flow_classifier import classify_flows, validate_flow_candidates
 from semantic.flow_schemas import FlowCandidateSet
 from semantic.schemas import CandidateSet
+from semantic.budget import ModelBudgetError
 
 DEFAULT_BASELINE_DIR = Path("runs/baseline")
 
@@ -100,7 +102,18 @@ def _is_credential_error(exc: Exception) -> bool:
     return any(marker in str(exc).lower() for marker in _CREDENTIAL_MARKERS)
 
 
+def _model_backend(args, *, default_provider=None):
+    from semantic.budget import ModelBudget
+    if not hasattr(args, '_model_budget'):
+        args._model_budget = ModelBudget(args.model_journal or args.runs_dir / 'model-budget.sqlite3',
+            max_calls=args.max_model_calls,max_tokens=args.max_model_tokens,
+            max_input_tokens=args.max_model_input_tokens,max_output_tokens=args.max_model_output_tokens)
+    backend = backend_for(args.provider,args.model,default_provider=default_provider)
+    return args._model_budget.wrap(backend,provider=type(backend).__module__ + '.' + type(backend).__qualname__)
+
+
 def _credential_help(backend, *, extra: str = "") -> str:
+    backend = getattr(backend, "backend", backend)
     key = (
         "OPENAI_API_KEY"
         if type(backend).__name__.startswith("OpenAI")
@@ -135,6 +148,12 @@ def parse_args(argv=None):
     p.add_argument("url", help="page or application to test (dev/staging only)")
 
     mode = p.add_argument_group("mode")
+    mode.add_argument("--discover-only", action="store_true",
+                      help="record a discovery proposal without classifying or executing tests")
+    mode.add_argument("--replay-only", action="store_true",
+                      help="replay saved tests without a crawl (the default for regression)")
+    mode.add_argument("--recrawl", action="store_true",
+                      help="also crawl and compare structure/UI during regression")
     mode.add_argument("--baseline", action="store_true",
                       help="crawl the whole application and record a baseline")
     mode.add_argument("--regression", action="store_true",
@@ -150,6 +169,18 @@ def parse_args(argv=None):
 
     crawl = p.add_argument_group("crawl (baseline and regression)")
     crawl.add_argument("--entry", default="/", help="path to start the crawl at")
+    crawl.add_argument('--crawl-checkpoint', type=Path, help='save an atomic resumable crawl journal here')
+    crawl.add_argument('--resume-crawl', type=Path, help='resume this crawl journal with the current run budgets')
+    crawl.add_argument('--retry-crawl-failures', action='store_true', help='also requeue failed tasks when resuming')
+    crawl.add_argument('--no-input-choices', action='store_true', help='skip individual dropdown/radio/checkbox branches')
+    crawl.add_argument('--crawl-readiness', type=Path, help='JSON array of UI readiness assertions after discovery actions')
+    crawl.add_argument("--max-depth", type=int, default=10, help="discovery depth; 0 disables")
+    crawl.add_argument("--max-attempts", type=int, default=2000,
+                       help="limit all discovery attempts, including failures; 0 disables")
+    crawl.add_argument("--crawl-seconds", type=float, default=120,
+                       help="discovery wall-clock budget; 0 disables")
+    crawl.add_argument("--id-segment-pattern", action="append", default=[],
+                       help="explicit full-match regex for instance-ID path segments")
     crawl.add_argument("--max-states", type=int, default=60)
     crawl.add_argument("--max-actions", type=int, default=400)
     crawl.add_argument("--exclude", action="append", default=[], metavar="PREFIX",
@@ -240,7 +271,51 @@ def parse_args(argv=None):
                      help="skip page-test teardown (leaves marker values behind)")
     run.add_argument("--timeout", type=int, default=10_000, help="per-step ms")
 
+    cache.add_argument('--identified-flows', type=Path, help='upstream identified flows JSON')
+    cache.add_argument('--expectation-mode', choices=('ai','rules'), default='ai')
+    cache.add_argument('--expectations', type=Path, help='reuse an evidence-matched AI expectation suite')
+    cache.add_argument('--save-expectations', type=Path)
+    cache.add_argument('--expectation-confidence', type=float, default=0.7)
+    llm.add_argument('--max-model-calls', type=int, default=5,
+                     help='total attempted calls across every stage (default: 5; zero disables new calls)')
+    llm.add_argument('--max-model-tokens', type=int, default=100_000,
+                     help='total conservative token reservations (default: 100000)')
+    llm.add_argument('--max-model-input-tokens', type=int, default=30_000,
+                     help='maximum per-request input reservation (UTF-8 bytes plus framing)')
+    llm.add_argument('--max-model-output-tokens', type=int, default=6000)
+    llm.add_argument('--model-journal', type=Path,
+                     help='durable call ledger/cache; reuse to resume (default: RUNS_DIR/model-budget.sqlite3)')
     args = p.parse_args(argv)
+    if min(args.max_model_calls,args.max_model_tokens,args.max_model_input_tokens) < 0 or args.max_model_output_tokens < 1:
+        p.error('model limits must be nonnegative; output limit must be positive')
+    if not 0 <= args.expectation_confidence <= 1:
+        p.error('--expectation-confidence must be between zero and one')
+    if args.identified_flows and args.flow_candidates:
+        p.error('--identified-flows and --flow-candidates are mutually exclusive')
+    if args.expectation_mode == 'rules' and (args.expectations or args.save_expectations or args.identified_flows):
+        p.error('generated expectations and identified flows require AI expectation mode')
+    if args.regression and (args.expectations or args.save_expectations or args.identified_flows):
+        p.error('regression reuses frozen expectations; create a new baseline to regenerate')
+    try:
+        args.discovery_readiness = tuple(UIAssertion.model_validate(c).model_dump(mode='json')
+            for c in json.loads(args.crawl_readiness.read_text())) if args.crawl_readiness else ()
+    except (ValueError,TypeError,OSError) as exc:
+        p.error(f'invalid crawl readiness: {exc}')
+    if args.crawl_checkpoint and args.resume_crawl:
+        p.error('--crawl-checkpoint and --resume-crawl are mutually exclusive')
+    if args.retry_crawl_failures and not args.resume_crawl:
+        p.error('--retry-crawl-failures requires --resume-crawl')
+    if (args.crawl_checkpoint or args.resume_crawl) and not (args.baseline or args.discover_only or args.recrawl):
+        p.error('crawl journals require --baseline, --discover-only, or --recrawl')
+    if args.discover_only:
+        if args.regression:
+            p.error("--discover-only cannot be combined with --regression")
+        args.baseline = True
+        args.no_flows = True
+    if args.replay_only and args.recrawl:
+        p.error("--replay-only and --recrawl are mutually exclusive")
+    if (args.replay_only or args.recrawl) and not args.regression:
+        p.error("--replay-only/--recrawl require --regression")
     if args.baseline and args.regression:
         p.error("--baseline and --regression are different modes; pick one")
 
@@ -261,6 +336,14 @@ def parse_args(argv=None):
     if args.highlight:
         args.headed = True
 
+    import re
+    if min(args.max_states, args.max_actions, args.max_attempts, args.max_depth, args.crawl_seconds) < 0:
+        p.error("discovery budgets must be nonnegative")
+    try:
+        for pattern in args.id_segment_pattern:
+            re.compile(pattern)
+    except re.error as exc:
+        p.error(f"invalid ID segment pattern: {exc}")
     args.credentials = _parse_credentials(args.credential, p.error)
 
     # A crawl fires every button it finds. Against localhost that is a demo
@@ -351,11 +434,22 @@ def _crawl(page, base_url: str, args, console) -> tuple[AppGraph, dict[str, dict
         readables[state.id] = readable_with_page(live_page)
 
     console.crawling(base_url)
+    checkpoint = args.resume_crawl or args.crawl_checkpoint or args.runs_dir / ('crawl-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f') + '.json')
+    console.crawl_event(f'crawl journal: {checkpoint}')
     crawler = Crawler(
         page,
         base_url,
         CrawlConfig(
+            checkpoint_path=str(checkpoint), resume=bool(args.resume_crawl),
+            retry_failed=args.retry_crawl_failures,
+            explore_inputs=not args.no_input_choices,
+            on_progress=console.crawl_event,
+            readiness=args.discovery_readiness,
             max_states=args.max_states,
+            max_depth=args.max_depth,
+            max_attempts=args.max_attempts,
+            max_seconds=args.crawl_seconds,
+            id_segment_patterns=tuple(args.id_segment_pattern),
             max_actions=args.max_actions,
             deny_destructive=args.safe,
             exclude_prefixes=tuple(args.exclude),
@@ -384,7 +478,11 @@ def _crawl(page, base_url: str, args, console) -> tuple[AppGraph, dict[str, dict
             ),
         ),
     )
-    graph = crawler.crawl(args.entry)
+    try:
+        graph = crawler.crawl(args.entry)
+        readables.update(crawler.readables)
+    finally:
+        crawler.close()
     console.crawled(graph)
     console.reading_values(len(readables))
     return graph, readables
@@ -392,6 +490,13 @@ def _crawl(page, base_url: str, args, console) -> tuple[AppGraph, dict[str, dict
 
 def _flow_candidates(graph, readables, args, console):
     """Flow candidates, from a file or from the model."""
+    if args.identified_flows:
+        from regression.expectations import IdentifiedFlow
+        candidates = [IdentifiedFlow.model_validate(f) for f in json.loads(args.identified_flows.read_text())['flows']]
+        if len({f.id for f in candidates}) != len(candidates):
+            raise ValueError('identified flow ids must be unique')
+        console.flow_classified(type('R', (), {'candidates': candidates, 'rejected': []})())
+        return candidates, [], 'upstream identified flows'
     if args.flow_candidates:
         loaded = FlowCandidateSet.model_validate_json(
             args.flow_candidates.read_text()
@@ -407,7 +512,7 @@ def _flow_candidates(graph, readables, args, console):
         )
         return candidates, rejected, model_name
 
-    backend = backend_for(args.provider, args.model,
+    backend = _model_backend(args,
                           default_provider=FLOW_PROVIDER)
     console.analyzing(backend.model)
     try:
@@ -432,10 +537,30 @@ def _flow_candidates(graph, readables, args, console):
     return result.candidates, result.rejected, result.model
 
 
-def _run_flows(page, graph, candidates, args, console):
+def _run_flows(page, graph, candidates, args, console, readables=None):
     """Instantiate and run every applicable flow invariant."""
-    engine = FlowEngine.load()
-    instances, skipped = engine.instantiate(candidates, graph)
+    if args.expectation_mode == 'ai':
+        from regression.expectations import ExpectationSuite, generate_expectations, compile_expectations
+        from discovery.checkpoints import atomic_json
+        if args.expectations:
+            suite = ExpectationSuite.from_saved_json(args.expectations.read_text())
+        else:
+            backend = _model_backend(args, default_provider=FLOW_PROVIDER)
+            print(f'Generating intended behaviors with {backend.model}...')
+            try:
+                suite = generate_expectations(candidates, graph, readables or {}, backend,
+                    checkpoint=args.runs_dir / 'expectation-progress.json')
+            except Exception as exc:
+                message = _credential_help(backend, extra='  Or use --expectations <saved-suite.json>\n') if _is_credential_error(exc) else f'Expectation generation failed: {exc}'
+                print(message, file=sys.stderr)
+                raise SystemExit(2) from None
+        args.expectation_suite = suite.model_dump(mode='json')
+        export = args.save_expectations or args.runs_dir / 'expectations' / (datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')+'.json')
+        atomic_json(export, args.expectation_suite)
+        instances, skipped = compile_expectations(suite, candidates, graph, readables or {}, args.expectation_confidence)
+    else:
+        engine = FlowEngine.load()
+        instances, skipped = engine.instantiate(candidates, graph)
 
     known = {instance.test_id for instance in instances}
     unknown = set(args.behavior_contracts) - known
@@ -454,10 +579,11 @@ def _run_flows(page, graph, candidates, args, console):
         print()
 
     by_goal = {
-        (c.capability.value, c.goal_state_id): c for c in candidates
+        (getattr(c.capability, "value", c.capability), c.goal_state_id): c for c in candidates
     }
-    runner = FlowRunner(page, timeout_ms=args.timeout,
-                        highlight_ms=args.highlight)
+    runner = FlowRunner(page, timeout_ms=args.timeout, settle_ms=args.settle,
+                        highlight_ms=args.highlight,
+                        artifacts_dir=args.runs_dir / "evidence" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f"))
 
     entries, records, verdicts = [], [], []
     for index, instance in enumerate(instances, start=1):
@@ -501,7 +627,7 @@ def _editable_states(graph) -> list:
 def _run_pages(page, graph, args, console):
     """Classify and run page-level persistence tests across the application."""
     engine = KnowledgeEngine.load()
-    backend = backend_for(args.provider, args.model)
+    backend = _model_backend(args)
 
     entries, records, verdicts, skipped_all = [], [], [], []
     counter = 1
@@ -606,7 +732,7 @@ def run_baseline(args) -> int:
                 )
                 if candidates:
                     f_entries, f_records, f_verdicts, f_skipped = _run_flows(
-                        page, graph, candidates, args, console
+                        page, graph, candidates, args, console, readables
                     )
                     entries += f_entries
                     records += f_records
@@ -635,6 +761,8 @@ def run_baseline(args) -> int:
         coverage={
             "crawl_closed": graph.is_closed(),
             "behavioral": behavioral,
+            "expectation_suite": getattr(args, "expectation_suite", None),
+            "model_budget": args._model_budget.summary() if hasattr(args, "_model_budget") else None,
             "skipped": [{"invariant": getattr(s, "invariant_id", ""),
                          "reasons": list(s.unmet)} for s in skipped],
         },
@@ -704,13 +832,17 @@ def run_regression(args) -> int:
             # tests themselves come from the baseline, so nothing about the
             # suite depends on what this crawl finds.
             console = ConsoleReporter()
-            graph, readables = _crawl(page, base_url, args, console)
+            if args.recrawl:
+                graph, readables = _crawl(page, base_url, args, console)
+            else:
+                graph, readables = AppGraph(base_url=base_url), {}
 
             reporter.replaying(len(replays))
             page_runner = PersistenceRunner(page, timeout_ms=args.timeout,
                                             highlight_ms=args.highlight)
-            flow_runner = FlowRunner(page, timeout_ms=args.timeout,
-                                     highlight_ms=args.highlight)
+            flow_runner = FlowRunner(page, timeout_ms=args.timeout, settle_ms=args.settle,
+                                     highlight_ms=args.highlight,
+                                     artifacts_dir=args.runs_dir / "evidence" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f"))
 
             for test, instance in replays:
                 aimed = baseline_loader.retarget_instance(
@@ -740,32 +872,30 @@ def run_regression(args) -> int:
         graph=graph, tests=fresh_records, readables=readables,
         model=recorded.model,
         coverage={"crawl_closed": graph.is_closed(), "expected_tests": len(replays),
-                  "executed_tests": len(fresh_records)},
+                  "executed_tests": len(fresh_records), "structural_comparison": args.recrawl,
+                  "ui_comparison": args.recrawl},
     )
 
     reporter.comparing()
-    found = diff(recorded, current)
+    found = diff(recorded, current, include_structure=args.recrawl, include_ui=args.recrawl)
     reporter.findings(found)
 
     interpretation = None
     if not args.no_interpret and len(found):
-        backend = backend_for(args.provider, args.model,
+        backend = _model_backend(args,
                               default_provider=INTERPRET_PROVIDER)
         try:
             interpretation = interpret(found, backend=backend)
         except Exception as exc:
-            if not _is_credential_error(exc):
+            if isinstance(exc, ModelBudgetError):
+                print(f'Skipping model interpretation: {exc}', file=sys.stderr)
+            elif not _is_credential_error(exc):
                 raise
             # A missing key degrades the report rather than failing the run:
             # the findings were computed deterministically and are the
             # actual evidence, so they stand on their own.
-            print(
-                _credential_help(
-                    backend,
-                    extra="  Or skip the reading: --no-interpret\n",
-                ),
-                file=sys.stderr,
-            )
+            if not isinstance(exc, ModelBudgetError):
+                print(_credential_help(backend,extra="  Or skip the reading: --no-interpret\n"),file=sys.stderr)
             interpretation = interpret_fallback(found)
         reporter.interpretation(interpretation)
     elif not len(found):
@@ -786,6 +916,9 @@ def run_regression(args) -> int:
         promoted = baseline_saver.save(current, args.new_baseline_dir)
 
     reporter.summary(found, path, promoted)
+    if not replays and not args.recrawl:
+        print("No behavioral tests in baseline; use --recrawl for structure/UI comparison.", file=sys.stderr)
+        return 2
     return regression_exit_code(found)
 
 
@@ -825,7 +958,7 @@ def run_adhoc(args) -> int:
                     type("R", (), {"candidates": candidates, "rejected": rejected})()
                 )
             else:
-                backend = backend_for(args.provider, args.model)
+                backend = _model_backend(args)
                 console.analyzing(backend.model)
                 try:
                     classification = classify(snapshot, backend=backend)
@@ -899,11 +1032,35 @@ def run_adhoc(args) -> int:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    if args.regression:
-        return run_regression(args)
-    if args.baseline:
-        return run_baseline(args)
-    return run_adhoc(args)
+    import signal
+    previous = None
+    import threading
+    if (args.baseline or args.recrawl) and threading.current_thread() is threading.main_thread():
+        def interrupted(*_):
+            raise KeyboardInterrupt()
+        previous = signal.signal(signal.SIGTERM, interrupted)
+    try:
+        if args.regression:
+            return run_regression(args)
+        if args.baseline:
+            return run_baseline(args)
+        return run_adhoc(args)
+    except ModelBudgetError as exc:
+        print(f'Model budget stopped this run: {exc}', file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        print('Interrupted. Crawl journals preserve pending work for --resume-crawl.',file=sys.stderr)
+        return 130
+    finally:
+        if hasattr(args, '_model_budget'):
+            from discovery.checkpoints import atomic_json
+            summary = args._model_budget.summary()
+            atomic_json(args.runs_dir / 'model-budget-summary.json', summary)
+            print(f"Model budget: {summary['attempted_calls']}/{summary['max_calls']} attempted calls; "
+                  f"{summary['reserved_tokens']}/{summary['max_tokens']} reserved tokens. "
+                  f"Journal: {summary['journal']}")
+        if previous is not None:
+            signal.signal(signal.SIGTERM,previous)
 
 
 if __name__ == "__main__":

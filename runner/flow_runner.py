@@ -84,8 +84,8 @@ def to_number(text: str) -> float | None:
     # An accounting negative is written as a prefix or in brackets, neither
     # of which the digit run itself captures.
     before = text[: match.start()]
-    if "-" in before or "(" in before:
-        value = -value
+    if re.search(r'-\s*[$£€¥]?\s*$', before) or re.search(r'\(\s*[$£€¥]?\s*$', before) and re.match(r'\s*\)', text[match.end():]):
+        value = -abs(value)
     return value
 
 
@@ -110,8 +110,42 @@ def read_binding(page, binding, timeout: int) -> Any:
     worst possible failure mode for a regression check, because it reports
     health precisely when something changed.
     """
+    from runner.locators import scope
+    page = scope(page, getattr(binding, "frame", None))
     kind = binding.extract
+    if kind in ('numeric_value','numeric_values'):
+        from knowledge.engine import _numeric_values
+        locator = page.locator(binding.selector)
+        count = locator.count()
+        if count == 0 or kind=='numeric_value' and count!=1:
+            raise StepError(f'{binding.name}: numeric selector must match {"one control" if kind=="numeric_value" else "at least one control"}')
+        values = locator.evaluate_all("es=>es.map(e=>['INPUT','SELECT','TEXTAREA'].includes(e.tagName)?e.value:e.innerText)")
+        numbers = _numeric_values(values)
+        if numbers is None:
+            raise StepError(f'{binding.name}: numeric control contains invalid data')
+        return numbers[0] if kind=='numeric_value' else numbers
     selector = binding.selector
+    scalar = {"text", "number", "value", "checked", "enabled"}
+    if kind in scalar and page.locator(selector).count() != 1:
+        raise StepError(f"{binding.name}: scalar binding must match exactly one element")
+    if kind == "checked":
+        return page.locator(selector).is_checked(timeout=timeout)
+    if kind == "enabled":
+        return page.locator(selector).is_enabled(timeout=timeout)
+    if kind == "selected":
+        locator = page.locator(selector)
+        if locator.count() == 1 and locator.evaluate("e => e.tagName") == "SELECT":
+            return locator.input_value(timeout=timeout)
+        chosen = page.locator(selector).and_(page.locator(":checked"))
+        if chosen.count() != 1:
+            raise StepError(f"{binding.name}: expected exactly one selected control")
+        return chosen.input_value(timeout=timeout)
+    if kind == "numeric_valid":
+        from knowledge.engine import RELATION_FUNCTIONS
+        values = _texts(page, selector, timeout)
+        if not values:
+            raise StepError(f"{binding.name}: numeric binding matched nothing")
+        return RELATION_FUNCTIONS["finite"](values)
 
     if kind == "count":
         try:
@@ -252,7 +286,8 @@ def _act(ctx: FlowStepContext, step) -> None:
         raise StepError(f"{label!r} has no usable locator to replay")
 
     try:
-        locator = locate(ctx.page, step)
+        from runner.locators import resolve
+        locator = resolve(ctx.page, step, ctx.timeout_ms)
         locator.wait_for(state="visible", timeout=ctx.timeout_ms)
     except StepError:
         raise
@@ -269,6 +304,12 @@ def _act(ctx: FlowStepContext, step) -> None:
             locator.fill(str(step.value or ""), timeout=ctx.timeout_ms)
         elif step.kind == "click":
             locator.click(timeout=ctx.timeout_ms)
+        elif step.kind == "select":
+            locator.select_option(str(step.value), timeout=ctx.timeout_ms)
+        elif step.kind == "check":
+            if not isinstance(step.value, bool):
+                raise StepError("check actions require a boolean value")
+            locator.set_checked(step.value, timeout=ctx.timeout_ms)
         else:
             raise StepError(f"unsupported step kind {step.kind!r}")
     except StepError:
@@ -281,8 +322,15 @@ def _act(ctx: FlowStepContext, step) -> None:
         if ctx.highlight_ms:
             clear_highlight(ctx.page)
 
-    if step.kind == "click":
+    if step.kind in ("click", "select", "check"):
         _settle(ctx)
+    if step.ready:
+        from knowledge.contracts import UIAssertion
+        from runner.contract_checks import assert_ui
+        try:
+            assert_ui(ctx.page,[UIAssertion.model_validate(item) for item in step.ready],ctx.timeout_ms)
+        except Exception as exc:
+            raise StepError(f'{label}: readiness failed: {_brief(exc)}') from None
 
 
 def _walk(ctx: FlowStepContext, steps, expected_state: str, phase: str) -> bool:
@@ -294,9 +342,13 @@ def _walk(ctx: FlowStepContext, steps, expected_state: str, phase: str) -> bool:
     do: every subsequent observation reads a real page, parses fine, and
     describes the wrong one.
     """
+    ctx.scratch["phase"] = phase
+    from runner.observation_points import capture
+    capture(ctx,phase,0)
     for index, step in enumerate(steps, start=1):
         try:
             _act(ctx, step)
+            capture(ctx,phase,index)
         except StepError as exc:
             ctx.scratch[f"{phase}_failed_at"] = f"step {index}/{len(steps)}: {exc}"
             return False
@@ -307,8 +359,15 @@ def _walk(ctx: FlowStepContext, steps, expected_state: str, phase: str) -> bool:
         contract = BehaviorContract.model_validate(ctx.instance.contract)
         assert_ui(ctx.page, contract.ready, ctx.timeout_ms)
     snapshot = inspect_with_page(ctx.page)
+    from discovery.policy import identity_snapshot
+    from discovery.fingerprint import url_template
+    policy = ctx.instance.identity_policy
+    expected_state = policy.get('state_aliases',{}).get(expected_state,expected_state)
+    snapshot = identity_snapshot(snapshot, policy.get("id_segment_patterns", []), policy.get('input_states', False))
+    template = url_template(snapshot.get("identity_url", snapshot.get("url", "")), strip_prefix=ctx.instance.route_prefix)
     print_ = fingerprint(
-        snapshot, strip_prefix=getattr(ctx.instance, "route_prefix", "")
+        snapshot, strip_prefix=ctx.instance.route_prefix,
+        ignore=frozenset(policy.get("volatile", {}).get(template, [])),
     )
     ctx.states.append({
         "phase": phase,
@@ -319,6 +378,14 @@ def _walk(ctx: FlowStepContext, steps, expected_state: str, phase: str) -> bool:
         "title": snapshot.get("title", ""),
     })
 
+    if phase == "goal" and ctx.instance.contract:
+        from knowledge.contracts import BehaviorContract
+        from urllib.parse import urlsplit
+        contract = BehaviorContract.model_validate(ctx.instance.contract)
+        if contract.goal_path:
+            prefix = ctx.instance.route_prefix.rstrip("/")
+            wanted = prefix + contract.goal_path
+            return urlsplit(ctx.page.url).path.rstrip("/") == wanted.rstrip("/")
     if print_.id != expected_state:
         ctx.scratch[f"{phase}_arrived_at"] = print_.url_template
         return False
@@ -358,6 +425,8 @@ def _observe_bindings(ctx: FlowStepContext) -> None:
         ctx.observations[binding.name] = read_binding(
             ctx.page, binding, ctx.timeout_ms
         )
+    from runner.observation_points import reload_observations
+    reload_observations(ctx)
 
 
 def _probe_target(ctx: FlowStepContext) -> str:
@@ -463,11 +532,13 @@ class FlowRunner:
         timeout_ms: int = DEFAULT_TIMEOUT_MS,
         settle_ms: int = DEFAULT_SETTLE_MS,
         highlight_ms: int = 0,
+        artifacts_dir=None,
     ):
         self.page = page
         self.timeout_ms = timeout_ms
         self.settle_ms = settle_ms
         self.highlight_ms = highlight_ms
+        self.artifacts_dir = artifacts_dir
 
     def run(self, instance) -> FlowRunResult:
         """Use a fresh context so cookies and origin storage cannot leak between tests."""
@@ -475,7 +546,24 @@ class FlowRunner:
         context = original.context.browser.new_context()
         try:
             self.page = context.new_page()
+            if self.artifacts_dir:
+                from pathlib import Path
+                directory = Path(self.artifacts_dir)
+                directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+                context.tracing.start(screenshots=True, snapshots=True)
             result = self._run(instance)
+            if self.artifacts_dir:
+                import hashlib
+                name = hashlib.sha256(instance.test_id.encode()).hexdigest()[:16]
+                screenshot = directory / f"{name}.png"
+                trace = directory / f"{name}-trace.zip"
+                try:
+                    self.page.screenshot(path=str(screenshot), full_page=True)
+                    result.notes["screenshot"] = str(screenshot)
+                except Exception as exc:
+                    result.notes["artifact_error"] = str(exc)
+                context.tracing.stop(path=str(trace))
+                result.notes["trace"] = str(trace)
             result.notes["isolation"] = "fresh_browser_context"
             return result
         finally:
@@ -500,6 +588,12 @@ class FlowRunner:
             highlight_ms=self.highlight_ms,
         )
 
+        ctx.scratch["phase"] = "fixture"
+        ctx.scratch["runtime_errors"] = []
+        def on_error(error):
+            ctx.scratch["runtime_errors"].append({"phase": ctx.scratch.get("phase", "fixture"),
+                                                  "message": str(error)[:2000], "url": self.page.url})
+        self.page.on("pageerror", on_error)
         try:
             # Every flow starts from a clean session. A previous flow's order
             # or deletion left in place would be indistinguishable from this
@@ -518,6 +612,10 @@ class FlowRunner:
         except Exception as exc:
             result.error = f"setup: {_brief(exc)}"
         finally:
+            if contract:
+                from runner.outcomes import collect
+                collect(ctx, contract)
+            ctx.scratch["phase"] = "cleanup"
             if contract and contract.cleanup:
                 try:
                     act(self.page, contract.cleanup, self.timeout_ms)

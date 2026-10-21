@@ -95,7 +95,7 @@ class ConsoleReporter:
         self._p(f"  Commit:  {commit.accessible_name if commit else '(autosave)'}")
         self._p(
             f"  Applicability confidence: "
-            f"{candidate.applicability_confidence:.2f}"
+            f"{getattr(candidate,'applicability_confidence',0):.2f}"
         )
         self._p()
         self._p("Applying rule:")
@@ -225,7 +225,7 @@ class ConsoleReporter:
         self._p(f"  {n} capability candidate{'' if n == 1 else 's'} identified.")
         for candidate in result.candidates:
             self._p(self.s.dim(
-                f"    {candidate.capability.value} -> {candidate.goal_state_id}"
+                f"    {getattr(candidate.capability, "value", candidate.capability)} -> {candidate.goal_state_id}"
             ))
         for rejected in result.rejected:
             self._p(self.s.dim(f"  discarded: {rejected.reason}"))
@@ -238,19 +238,20 @@ class ConsoleReporter:
         if instance.probe_mode:
             target = instance.probe_path or f"({instance.probe_mode})"
             self._p(f"  Probe:      {target}")
-        self._p(
-            f"  Applicability confidence: "
-            f"{candidate.applicability_confidence:.2f}"
-        )
+        confidence = getattr(candidate, 'applicability_confidence', None)
+        if confidence is not None:
+            self._p(f"  Applicability confidence: {confidence:.2f}")
+        if instance.expectation:
+            self._p(f"  Expected: {instance.expectation['expected_outcome']}")
         self._p()
-        self._p("Applying rule:")
+        self._p("Testing AI-generated expectation:" if instance.expectation else "Applying rule:")
         self._p(f"  {instance.invariant}")
         self._p()
 
     def flow_skipped(self, skip) -> None:
         self._p(self.s.dim(
             f"  skipped {skip.invariant_id} for "
-            f"{skip.candidate.capability.value}: {', '.join(skip.unmet)}"
+            f"{getattr(skip.candidate.capability,'value',skip.candidate.capability)}: {', '.join(skip.unmet)}"
         ))
 
     def flow_testing(self, result) -> None:
@@ -429,11 +430,14 @@ def build_flow_entry(instance, candidate, result, verdict) -> dict:
             if instance.probe_mode
             else None
         ),
-        "applicability_confidence": candidate.applicability_confidence
+        "applicability_confidence": getattr(candidate, "applicability_confidence", None)
         if candidate
         else None,
         "applicability_reasoning": candidate.reasoning_summary if candidate else None,
         "expected_relation": instance.expected_relation,
+        "generated_expectation": instance.expectation,
+        "observation_evidence": result.notes.get('observation_evidence',[]),
+        "observation_errors": result.notes.get('observation_errors',[]),
         "precondition": instance.precondition,
         "observations": result.observations,
         "states": result.states,
@@ -474,7 +478,7 @@ def build_mixed_record(
             {
                 "invariant": s.invariant_id,
                 "subject": getattr(
-                    getattr(s.candidate, "capability", None), "value", None
+                    getattr(s.candidate, "capability", None), "value", getattr(s.candidate, "capability", None)
                 )
                 or getattr(s.candidate, "field_id", "?"),
                 "unmet_requirements": list(s.unmet),

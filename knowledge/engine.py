@@ -206,7 +206,62 @@ def _fn_len(value: Any) -> int:
     return len(_as_list(value, "len"))
 
 
+def _numeric_values(value):
+    """A validity predicate returns false for bad application data, not NaN."""
+    import math
+    items = list(value) if isinstance(value, (list, tuple)) else [value]
+    if not items:
+        return None
+    numbers = []
+    for item in items:
+        if isinstance(item, bool) or item is None:
+            return None
+        try:
+            if isinstance(item, str):
+                item = item.strip().replace(",", "")
+                item = re.sub(r"^[£$€¥]\s*", "", item)
+                if item.startswith("(") and item.endswith(")"):
+                    item = "-" + item[1:-1]
+            number = float(item)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(number):
+            return None
+        numbers.append(number)
+    return numbers
+
+
+def _fn_finite(value):
+    return _numeric_values(value) is not None
+
+
+def _fn_nonnegative(value):
+    numbers = _numeric_values(value)
+    return numbers is not None and all(number >= 0 for number in numbers)
+
+
+def _fn_positive_integers(value):
+    numbers = _numeric_values(value)
+    return numbers is not None and all(number > 0 and number.is_integer() for number in numbers)
+
+
+def _fn_product(value):
+    import math
+    numbers = _numeric_values(value)
+    if numbers is None:
+        raise ValueError('product requires finite numeric factors')
+    result = math.prod(numbers)
+    if not math.isfinite(result):
+        raise ValueError('product is not finite')
+    return result
+
+
 RELATION_FUNCTIONS: dict[str, Callable[[Any], Any]] = {
+    "product": _fn_product,
+    "no_errors": lambda value: not any(re.search(r"Cannot read properties|(?:Type|Reference|Syntax)Error", str(item)) for item in _as_list(value, "no_errors")),
+    "finite": _fn_finite,
+    "nonnegative": _fn_nonnegative,
+    "positive_integers": _fn_positive_integers,
     "sum": _fn_sum,
     "count": _fn_count,
     "len": _fn_len,

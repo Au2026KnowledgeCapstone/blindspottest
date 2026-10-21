@@ -14,8 +14,24 @@ class StrictModel(BaseModel):
 
 class UIAssertion(StrictModel):
     selector: str
-    kind: Literal["visible", "count", "text", "value"] = "visible"
+    frame: str | None = None
+    kind: Literal["visible", "count", "text", "value", "checked", "enabled"] = "visible"
     expected: Any = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def expected_type(cls, data):
+        if not isinstance(data, dict):
+            return data
+        kind = data.get("kind", "visible")
+        value = data.get("expected", True)
+        if kind in ("visible", "checked", "enabled") and type(value) is not bool:
+            raise ValueError(f"{kind} readiness requires a boolean expected value")
+        if kind == "count" and (type(value) is not int or value < 0):
+            raise ValueError("count readiness requires a nonnegative integer expected value")
+        if kind in ("text", "value") and type(value) is not str:
+            raise ValueError(f"{kind} readiness requires a string expected value")
+        return data
 
 
 class APIAssertion(StrictModel):
@@ -34,6 +50,8 @@ class APIAssertion(StrictModel):
 
 
 class FixtureAction(StrictModel):
+    frame: str | None = None
+    ready: list[UIAssertion] = Field(default_factory=list)
     kind: Literal["click", "fill", "select", "check"]
     selector: str
     value: str | bool | None = None
@@ -55,8 +73,53 @@ class BranchEvidence(StrictModel):
     recommendation: str
 
 
+class OutcomeCheck(StrictModel):
+    id: str = Field(min_length=1)
+    version: str = "1"
+    relation: str
+    bindings: list["ObservationBinding"] = Field(default_factory=list)
+    severity: Literal["low", "medium", "high"] = "high"
+
+    @model_validator(mode="after")
+    def validate_relation(self):
+        from knowledge.engine import Relation
+        operands = Relation.parse(self.relation).operands
+        supplied = [binding.name for binding in self.bindings]
+        if len(set(supplied)) != len(supplied) or operands != set(supplied):
+            raise ValueError("check bindings must uniquely supply every relation operand")
+        return self
+
+
+from semantic.flow_schemas import ObservationBinding
+OutcomeCheck.model_rebuild()
+
+
+class RuntimeErrorRule(StrictModel):
+    pattern: str = Field(min_length=1, max_length=500)
+    reason: str = Field(min_length=1)
+    phases: list[Literal['fixture','setup','goal','verification','cleanup']] = Field(default_factory=lambda:['goal'])
+
+    @model_validator(mode='after')
+    def valid_pattern(self):
+        import re
+        try:
+            re.compile(self.pattern)
+        except re.error as exc:
+            raise ValueError(f'invalid runtime error pattern: {exc}') from None
+        if not self.reason.strip():
+            raise ValueError('runtime error rules require a reason')
+        return self
+
+
 class BehaviorContract(StrictModel):
     version: str = "1"
+    rule_version: str = "1"
+    runtime_errors: Literal["fail", "record"] = "fail"
+    runtime_error_rules: list[RuntimeErrorRule] = Field(default_factory=list)
+    checks: list[OutcomeCheck] = Field(default_factory=list)
+    reload_checks: list[OutcomeCheck] = Field(default_factory=list)
+    reload_ready: list[UIAssertion] = Field(default_factory=list)
+    goal_path: str | None = None
     capability: str
     invariant: str
     expected_relation: str
@@ -83,6 +146,14 @@ class BehaviorContract(StrictModel):
         Relation.parse(self.expected_relation)
         if self.precondition:
             Relation.parse(self.precondition)
+        if len({check.id for check in self.checks}) != len(self.checks):
+            raise ValueError("outcome check ids must be unique")
+        if len({check.id for check in self.reload_checks}) != len(self.reload_checks):
+            raise ValueError('reload check ids must be unique')
+        if self.goal_path is not None and (not self.goal_path.startswith("/") or self.goal_path.startswith("//") or "?" in self.goal_path):
+            raise ValueError("goal_path must be an application-relative path without query")
+        if self.goal_path and not self.ready:
+            raise ValueError("goal_path arrival requires explicit ready assertions")
         if self.review_status == "confirmed" and not (self.reviewed_by and self.requirement_source and self.fixture_version):
             raise ValueError("confirmed contracts require reviewed_by, requirement_source and fixture_version")
         if self.review_status == "confirmed" and not self.preconditions:

@@ -249,7 +249,7 @@ def fingerprint(
     it stays a pure function of its arguments.
     """
     template = url_template(
-        snapshot.get("url", ""),
+        snapshot.get("identity_url", snapshot.get("url", "")),
         keep_query_keys=keep_query_keys,
         strip_prefix=strip_prefix,
     )
@@ -263,6 +263,9 @@ def fingerprint(
         for sig, count in sorted(counts.items())
         if sig not in ignore
     )
+    if snapshot.get('input_state'):
+        import json
+        signature += ('inputs:' + json.dumps(snapshot['input_state'], sort_keys=True),)
 
     digest = hashlib.sha256(
         ("\n".join((template,) + signature)).encode("utf-8")

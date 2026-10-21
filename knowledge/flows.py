@@ -274,7 +274,8 @@ class PathStep:
     kind: str  # "click" | "fill"
     label: str
     locator: dict
-    value: str | None = None
+    value: str | bool | None = None
+    ready: tuple[dict, ...] = ()
 
     @property
     def locator_strategy(self) -> dict:
@@ -290,6 +291,7 @@ class PathStep:
             "label": self.label,
             "locator": self.locator,
             "value": self.value,
+            **({'ready':list(self.ready)} if self.ready else {}),
         }
 
     @classmethod
@@ -299,6 +301,7 @@ class PathStep:
             label=data.get("label", ""),
             locator=data.get("locator") or {},
             value=data.get("value"),
+            ready=tuple(data.get('ready',())),
         )
 
 
@@ -309,15 +312,16 @@ class BindingSpec:
     name: str
     selector: str
     extract: str
+    frame: str | None = None
 
     def to_dict(self) -> dict:
         return {"name": self.name, "selector": self.selector,
-                "extract": self.extract}
+                "extract": self.extract, "frame": self.frame}
 
     @classmethod
     def from_dict(cls, data: dict) -> BindingSpec:
         return cls(name=data["name"], selector=data["selector"],
-                   extract=data["extract"])
+                   extract=data["extract"], frame=data.get("frame"))
 
 
 @dataclass(frozen=True)
@@ -368,6 +372,10 @@ class FlowTestInstance:
     # the route and `/broken/cart` is not `/cart`.
     route_prefix: str = ""
     contract: dict = field(default_factory=dict)
+    rule_version: str = "1"
+    identity_policy: dict = field(default_factory=dict)
+    observation_points: tuple[dict, ...] = ()
+    expectation: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -389,6 +397,10 @@ class FlowTestInstance:
             "precondition": self.precondition,
             "route_prefix": self.route_prefix,
             "contract": self.contract,
+            "rule_version": self.rule_version,
+            "identity_policy": self.identity_policy,
+            "observation_points": list(self.observation_points),
+            "expectation": self.expectation,
         }
 
     @classmethod
@@ -414,6 +426,10 @@ class FlowTestInstance:
             precondition=data.get("precondition"),
             route_prefix=data.get("route_prefix", ""),
             contract=data.get("contract", {}),
+            rule_version=data.get("rule_version", "1"),
+            identity_policy=data.get("identity_policy", {}),
+            observation_points=tuple(data.get('observation_points',())),
+            expectation=data.get('expectation',{}),
         )
 
     def describe(self) -> str:
@@ -467,8 +483,8 @@ def path_steps(graph: AppGraph, actions: Iterable[Action]) -> tuple[PathStep, ..
                 f"{action.affordance_key!r} to replay"
             )
         steps.append(
-            PathStep(kind="click", label=affordance.label,
-                     locator=affordance.locator)
+            PathStep(kind=action.kind, label=affordance.label,
+                     locator=affordance.locator, value=action.value)
         )
     return tuple(steps)
 
@@ -591,7 +607,7 @@ class FlowEngine:
             # it up — and carrying extras into the instance would put values
             # in the record that nothing asserts about.
             bindings=tuple(
-                BindingSpec(b.name, b.selector, b.extract.value)
+                BindingSpec(b.name, b.selector, b.extract.value, b.frame)
                 for b in candidate.bindings
                 if b.name in inv.bindings
             ),
@@ -602,6 +618,8 @@ class FlowEngine:
             expected_relation=inv.expected_relation.source,
             precondition=inv.precondition.source if inv.precondition else None,
             contract=inferred_contract(candidate, inv, setup_state),
+            identity_policy={"id_segment_patterns": graph.metrics.get("id_segment_patterns", []),
+                             "input_states": graph.metrics.get("input_states", False), "volatile": graph.volatile},
         )
 
     def instantiate(
@@ -693,6 +711,9 @@ if __name__ == "__main__":
 
 def evaluate_instance(instance, result):
     """Evaluate the recorded expectation, never a silently updated rule file."""
+    if getattr(result, "notes", {}).get("observation_errors"):
+        return Verdict(instance.invariant, Status.INCONCLUSIVE,
+                       "scheduled observation failed", result.observations)
     if result.error or result.reset is False:
         return Verdict(instance.invariant, Status.INCONCLUSIVE,
                        result.error or "cleanup verification failed", result.observations)
@@ -704,4 +725,4 @@ def evaluate_instance(instance, result):
                        "application outcome assertion failed", result.observations, severity="high")
     return decide(instance.invariant, Relation.parse(instance.expected_relation),
                   Relation.parse(instance.precondition) if instance.precondition else None,
-                  result.observations, on_violation={"severity": "high"})
+                  result.observations, on_violation={"severity": instance.expectation.get("severity", "high")})

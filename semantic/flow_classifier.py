@@ -97,6 +97,17 @@ identifying the new resource).
       session_termination    : no bindings needed; use a probe.
       authenticate           : `signed_in` (visible, evidence the session is \
 active).
+    Additional optional bindings: `quantity` (numeric_value from an input/select)
+    and `stock_limit` (number) for stock limits; `line_factors` (numeric_values
+    from quantity and unit-price controls) and `line_total` (number) for
+    quantity-times-price consistency. Only supply these when their meaning is
+    explicit on the page. `quantities` (value/texts) for positive-integer
+    purchase quantities; `amounts` (texts) for finite/nonnegative monetary values
+    in an explicitly nonnegative scope (do not include discount lines);
+    `selected_method` (selected) and `reviewed_method` (text) for payment selection;
+    access_control uses `rendered_messages` (texts) on the application error surface.
+    Do not assume authentication policy from a URL name. Extra bindings are only
+    appropriate when their meaning and scope are supported by observed evidence.
     Choose selectors from the READABLE VALUES you were given. A selector \
 matching several elements is correct for a collection and wrong for a single \
 total — the match count tells you which you have.

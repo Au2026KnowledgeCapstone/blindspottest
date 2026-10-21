@@ -1,0 +1,212 @@
+{
+  "schema_version": "1.0",
+  "kind": "flow",
+  "invariants": [
+    {
+      "id": "POSITIVE_QUANTITIES",
+      "name": "Positive Quantities",
+      "description": "Purchase quantities must be positive integers",
+      "applies_to": [
+        "multi_step_transaction"
+      ],
+      "requirements": [
+        "goal_reachable",
+        "goal_differs_from_setup"
+      ],
+      "bindings": [
+        "quantities"
+      ],
+      "procedure": [
+        "walk_setup",
+        "walk_goal",
+        "observe_bindings"
+      ],
+      "precondition": "goal_reached == true",
+      "expected_relation": "positive_integers(quantities) == true",
+      "teardown": [
+        "reset_session"
+      ],
+      "on_violation": {
+        "severity": "high",
+        "summary": "Purchase quantities must be positive integers"
+      }
+    },
+    {
+      "id": "FINITE_AMOUNTS",
+      "name": "Finite Amounts",
+      "description": "Rendered monetary values must be finite numbers",
+      "applies_to": [
+        "multi_step_transaction"
+      ],
+      "requirements": [
+        "goal_reachable",
+        "goal_differs_from_setup"
+      ],
+      "bindings": [
+        "amounts"
+      ],
+      "procedure": [
+        "walk_setup",
+        "walk_goal",
+        "observe_bindings"
+      ],
+      "precondition": "goal_reached == true",
+      "expected_relation": "finite(amounts) == true",
+      "teardown": [
+        "reset_session"
+      ],
+      "on_violation": {
+        "severity": "high",
+        "summary": "Rendered monetary values must be finite numbers"
+      }
+    },
+    {
+      "id": "NONNEGATIVE_AMOUNTS",
+      "name": "Nonnegative Amounts",
+      "description": "Monetary amounts in the declared nonnegative scope must not be negative; exclude discount lines",
+      "applies_to": [
+        "multi_step_transaction"
+      ],
+      "requirements": [
+        "goal_reachable",
+        "goal_differs_from_setup"
+      ],
+      "bindings": [
+        "amounts"
+      ],
+      "procedure": [
+        "walk_setup",
+        "walk_goal",
+        "observe_bindings"
+      ],
+      "precondition": "goal_reached == true",
+      "expected_relation": "nonnegative(amounts) == true",
+      "teardown": [
+        "reset_session"
+      ],
+      "on_violation": {
+        "severity": "high",
+        "summary": "Monetary amounts in the declared nonnegative scope must not be negative; exclude discount lines"
+      }
+    },
+    {
+      "id": "PAYMENT_SELECTION_CONSISTENCY",
+      "name": "Payment Selection Consistency",
+      "description": "Selected payment method must agree with review",
+      "applies_to": [
+        "multi_step_transaction"
+      ],
+      "requirements": [
+        "goal_reachable",
+        "goal_differs_from_setup"
+      ],
+      "bindings": [
+        "selected_method",
+        "reviewed_method"
+      ],
+      "procedure": [
+        "walk_setup",
+        "walk_goal",
+        "observe_bindings"
+      ],
+      "precondition": "goal_reached == true",
+      "expected_relation": "selected_method == reviewed_method",
+      "teardown": [
+        "reset_session"
+      ],
+      "on_violation": {
+        "severity": "high",
+        "summary": "Selected payment method must agree with review"
+      }
+    },
+    {
+      "id": "CONTROLLED_ERROR_HANDLING",
+      "name": "Controlled Error Handling",
+      "description": "The configured application error surface must not render JavaScript null-access errors",
+      "applies_to": [
+        "access_control"
+      ],
+      "requirements": [
+        "goal_reachable",
+        "goal_differs_from_setup"
+      ],
+      "bindings": [
+        "rendered_messages"
+      ],
+      "procedure": [
+        "walk_setup",
+        "walk_goal",
+        "observe_bindings"
+      ],
+      "precondition": "goal_reached == true",
+      "expected_relation": "no_errors(rendered_messages) == true",
+      "teardown": [
+        "reset_session"
+      ],
+      "on_violation": {
+        "severity": "high",
+        "summary": "The configured application error surface must not render JavaScript null-access errors"
+      }
+    },
+    {
+      "id": "STOCK_LIMIT",
+      "name": "Stock Limit",
+      "description": "Requested quantity must not exceed the configured available stock",
+      "applies_to": [
+        "multi_step_transaction"
+      ],
+      "requirements": [
+        "goal_reachable",
+        "goal_differs_from_setup"
+      ],
+      "bindings": [
+        "quantity",
+        "stock_limit"
+      ],
+      "procedure": [
+        "walk_setup",
+        "walk_goal",
+        "observe_bindings"
+      ],
+      "precondition": "goal_reached == true",
+      "expected_relation": "quantity <= stock_limit",
+      "teardown": [
+        "reset_session"
+      ],
+      "on_violation": {
+        "severity": "high",
+        "summary": "Requested quantity must not exceed the configured available stock"
+      }
+    },
+    {
+      "id": "LINE_TOTAL_CONSISTENCY",
+      "name": "Line Total Consistency",
+      "description": "Quantity multiplied by unit price must equal the line total",
+      "applies_to": [
+        "multi_step_transaction"
+      ],
+      "requirements": [
+        "goal_reachable",
+        "goal_differs_from_setup"
+      ],
+      "bindings": [
+        "line_factors",
+        "line_total"
+      ],
+      "procedure": [
+        "walk_setup",
+        "walk_goal",
+        "observe_bindings"
+      ],
+      "precondition": "goal_reached == true",
+      "expected_relation": "product(line_factors) == line_total",
+      "teardown": [
+        "reset_session"
+      ],
+      "on_violation": {
+        "severity": "high",
+        "summary": "Quantity multiplied by unit price must equal the line total"
+      }
+    }
+  ]
+}

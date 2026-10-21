@@ -120,7 +120,7 @@ class StateReader:
     # -- identifying -------------------------------------------------------
 
     def template_of(self, snapshot: dict) -> str:
-        return url_template(snapshot.get("url", ""), strip_prefix=self.strip_prefix)
+        return url_template(snapshot.get("identity_url", snapshot.get("url", "")), strip_prefix=self.strip_prefix)
 
     def identify(self, snapshot: dict) -> Fingerprint:
         """One snapshot to an identity, honouring what has been learned."""

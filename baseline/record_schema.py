@@ -39,7 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "1.2"
 
 MANIFEST_FILE = "manifest.json"
 GRAPH_FILE = "graph.json"
@@ -74,6 +74,16 @@ class TestRecord:
     error: str | None = None
     duration_ms: int = 0
     evidence: dict = field(default_factory=dict)
+    execution: dict = field(default_factory=dict)
+    outcomes: list[dict] = field(default_factory=list)
+    provenance: dict = field(default_factory=dict)
+
+    @property
+    def expectation_status(self):
+        statuses = [self.status] + [check["status"] for check in self.outcomes]
+        if "violated" in statuses:
+            return "violated"
+        return "inconclusive" if "inconclusive" in statuses else "holds"
 
     @property
     def status(self) -> str:
@@ -91,6 +101,10 @@ class TestRecord:
             "error": self.error,
             "duration_ms": self.duration_ms,
             "evidence": self.evidence,
+            "execution": self.execution,
+            "expectation_status": self.expectation_status,
+            "outcomes": self.outcomes,
+            "provenance": self.provenance,
         }
 
     @classmethod
@@ -106,6 +120,9 @@ class TestRecord:
             error=data.get("error"),
             duration_ms=data.get("duration_ms", 0),
             evidence=data.get("evidence", {}),
+            execution=data.get("execution", {}),
+            outcomes=data.get("outcomes", []),
+            provenance=data.get("provenance", {}),
         )
 
 
@@ -168,7 +185,7 @@ def check_version(manifest: dict) -> None:
     with defects that are really format drift.
     """
     found = manifest.get("schema_version")
-    if found not in ("1.0", SCHEMA_VERSION):
+    if found not in ("1.0", "1.1", SCHEMA_VERSION):
         raise BaselineError(
             f"baseline schema version {found!r} is not {SCHEMA_VERSION!r}; "
             f"re-record the baseline with this build"

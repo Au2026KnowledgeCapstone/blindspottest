@@ -160,7 +160,27 @@ def strict_schema(model: type[BaseModel]) -> dict:
     of keywords providers reject is a property of the providers, not of any
     one schema.
     """
-    return _strip_unsupported(model.model_json_schema())
+    schema = _strip_unsupported(model.model_json_schema())
+
+    def require_properties(node):
+        if isinstance(node, dict):
+            node.pop("default", None)
+            if "$ref" in node:
+                # Provider strict mode rejects annotations beside references.
+                # The referenced definition retains its own documentation.
+                node.pop("description", None)
+                node.pop("title", None)
+            if node.get("type") == "object":
+                node["additionalProperties"] = False
+                node["required"] = list(node.get("properties", {}))
+            for value in node.values():
+                require_properties(value)
+        elif isinstance(node, list):
+            for value in node:
+                require_properties(value)
+
+    require_properties(schema)
+    return schema
 
 
 def candidate_set_schema() -> dict:

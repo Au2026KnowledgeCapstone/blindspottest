@@ -21,6 +21,7 @@ from pathlib import Path
 
 from regression.findings import Direction, FindingSet, Kind
 from discovery.graph import AppGraph
+from regression.results import comparison_status as _comparison_status
 from reporting.reporter import _Style, _supports_color
 
 RUNS_DIR = Path("runs")
@@ -238,11 +239,24 @@ def build_regression_record(
             "counts": current.manifest()["counts"],
         },
         **found.to_dict(),
+        "comparison_scope": {"structure": current.coverage.get("structural_comparison", True),
+                             "ui": current.coverage.get("ui_comparison", True)},
+        "test_comparisons": [
+            {"test_id": test.test_id, "execution": test.execution,
+             "expectation_status": test.expectation_status,
+             "comparison": _comparison_status(baseline.by_test_id().get(test.test_id), test)}
+            for test in current.tests],
+        "finding_groups": [
+            {"test_id": ident, "findings": [f.to_dict() for f in found.ranked()
+                                             if f.subject.split("/")[0] == ident]}
+            for ident in sorted({f.subject.split("/")[0] for f in found})],
         "coverage": {
             "baseline_tests": len(baseline.tests), "executed_tests": len(current.tests),
-            "conclusive_tests": sum(t.status != "inconclusive" and not t.error for t in current.tests),
+            "conclusive_tests": sum(t.expectation_status != "inconclusive" and t.execution.get("status") != "failed" and not t.error for t in current.tests),
             "baseline_crawl_closed": AppGraph.from_dict(baseline.graph).is_closed(),
             "current_crawl_closed": AppGraph.from_dict(current.graph).is_closed(),
+            "baseline_discovery": baseline.graph.get('metrics', {}),
+            "current_discovery": current.graph.get('metrics', {}),
         },
         "results": [t.to_dict() for t in current.tests],
         "suggestions": [dict(item, test_id=t.test_id)

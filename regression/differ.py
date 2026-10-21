@@ -83,17 +83,13 @@ def _verdict_finding(before: TestRecord, after: TestRecord) -> Finding | None:
     was, now = before.status, after.status
     old_contract = before.instance.get("contract", {})
     new_contract = after.instance.get("contract", {})
-    # Only compare the same recorded semantics and fixture declaration.
-    execution_keys = ("capability", "setup", "goal", "bindings", "procedure", "probe_mode", "probe_path")
-    comparable = (all(before.instance.get(k) == after.instance.get(k) for k in execution_keys) and
-                  old_contract == new_contract and
-                  before.instance.get("expected_relation") == after.instance.get("expected_relation") and
-                  before.instance.get("precondition") == after.instance.get("precondition"))
+    from regression.results import comparable as same_spec
+    comparable = same_spec(before, after)
     if not comparable:
         return Finding(Kind.VERDICT, Direction.CHANGED, after.test_id,
                        "Expectation or fixture contract changed; results are not directly comparable",
                        invariant=after.invariant, before=was, after=now)
-    if now == "inconclusive" or after.error or after.evidence.get("cleanup_verified") is False:
+    if now == "inconclusive" or after.error or after.execution.get("status") == "failed" or after.evidence.get("cleanup_verified") is False:
         direction = Direction.EXECUTION
     elif now == "violated" and was == "violated":
         direction = Direction.EXISTING
@@ -220,6 +216,37 @@ def _run_finding(before: TestRecord, after: TestRecord) -> Finding | None:
     )
 
 
+def _outcome_findings(before, after):
+    from dataclasses import replace
+    from regression.results import comparable
+    old = {check["id"]: check for check in before.outcomes}
+    new = {check["id"]: check for check in after.outcomes}
+    out = []
+    for ident in sorted(set(old) | set(new)):
+        a, b = old.get(ident), new.get(ident)
+        subject = f"{after.test_id}/{ident}"
+        if a is None or b is None:
+            out.append(Finding(Kind.MISSING, Direction.COVERAGE, subject,
+                               f"Outcome check {ident} {'was added' if a is None else 'was not evaluated'}"))
+            continue
+        if not comparable(before, after) or (a.get("version"), a.get("relation")) != (b.get("version"), b.get("relation")):
+            out.append(Finding(Kind.VERDICT, Direction.CHANGED, subject,
+                               f"Outcome check {ident} changed specification; comparison requires review"))
+            continue
+        # A completed secondary check has its own evidence. Do not replace
+        # that with the execution error of an unrelated primary binding.
+        left = replace(before, invariant=ident, verdict=a, error=None,
+                       execution={}, outcomes=[], evidence={})
+        right = replace(after, invariant=ident, verdict=b, error=None,
+                        execution={}, outcomes=[], evidence={})
+        finding = _verdict_finding(left, right)
+        if finding:
+            out.append(replace(finding, subject=subject,
+                               before={"status": a["status"], "observations": a.get("observations", {})},
+                               after={"status": b["status"], "observations": b.get("observations", {})}))
+    return out
+
+
 def diff_tests(baseline: BaselineRecord, current: BaselineRecord) -> list[Finding]:
     """Compare the two runs' tests, matched by test id."""
     out: list[Finding] = []
@@ -268,6 +295,7 @@ def diff_tests(baseline: BaselineRecord, current: BaselineRecord) -> list[Findin
         if run:
             out.append(run)
         out.extend(_observation_findings(before, after))
+        out.extend(_outcome_findings(before, after))
 
     return out
 
@@ -378,7 +406,7 @@ def diff(
             ),
         ))
     for side, record in (("baseline", baseline), ("current", current)):
-        if record.graph and not AppGraph.from_dict(record.graph).is_closed():
+        if (include_structure or include_ui) and record.graph and not AppGraph.from_dict(record.graph).is_closed():
             found.add(Finding(Kind.STRUCTURE, Direction.COVERAGE, side,
                               f"{side} crawl is incomplete; absence claims require review"))
     for skipped in baseline.coverage.get("skipped", []):

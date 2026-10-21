@@ -20,6 +20,8 @@ from pathlib import Path
 from secrets import token_hex
 from typing import Iterable
 
+from regression.results import execution, signature, EVALUATOR_VERSION
+
 from baseline.record_schema import (
     FLOW,
     GRAPH_FILE,
@@ -56,6 +58,9 @@ def page_test_record(instance, result, verdict) -> TestRecord:
         states=[],
         error=result.error,
         duration_ms=result.duration_ms,
+        execution=execution(result),
+        outcomes=result.notes.get("outcomes", []),
+        provenance={"semantics_hash": signature(instance.to_dict()), "evaluator_version": EVALUATOR_VERSION},
     )
 
 
@@ -75,6 +80,9 @@ def flow_test_record(instance, result, verdict) -> TestRecord:
                   "notes": result.notes, "cleanup_verified": result.reset, "suggestions": proposed},
         error=result.error,
         duration_ms=result.duration_ms,
+        execution=execution(result),
+        outcomes=result.notes.get("outcomes", []),
+        provenance={"semantics_hash": signature(instance.to_dict()), "evaluator_version": EVALUATOR_VERSION},
     )
 
 
@@ -126,6 +134,8 @@ def save(record: BaselineRecord, directory: Path | str) -> Path:
         _write_json(staging / GRAPH_FILE, record.graph)
         _write_json(staging / READABLES_FILE, record.readables)
         _write_json(staging / TESTS_FILE, {"tests": [t.to_dict() for t in record.tests]})
+        if record.coverage.get('expectation_suite') is not None:
+            _write_json(staging / 'expectations.json', record.coverage['expectation_suite'])
         _write_json(staging / MANIFEST_FILE, record.manifest())
         # Atomic publication: the complete directory appears together.
         os.rename(staging, directory)

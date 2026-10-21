@@ -61,6 +61,7 @@ from discovery.page_inspector import inspect_with_page
 from discovery.stability import DEFAULT_GAP_MS, DEFAULT_READS, StateReader
 from runner.highlight import DEFAULT_DWELL_MS, caption_for, clear, highlight
 from runner.persistence_runner import locate
+from discovery.checkpoints import CheckpointMixin
 
 # --------------------------------------------------------------------------
 # Configuration
@@ -101,6 +102,17 @@ class CrawlConfig:
     max_states: int = 60
     max_actions: int = 400
     max_depth: int = 10
+    max_attempts: int = 2000
+    max_seconds: float = 120
+    restore_failure_limit: int = 2
+    id_segment_patterns: tuple[str, ...] = ()
+    checkpoint_path: str | None = None
+    resume: bool = False
+    retry_failed: bool = False
+    explore_inputs: bool = True
+    progress_every: int = 10
+    readiness: tuple[dict, ...] = ()
+    on_progress: Callable[[str], None] | None = None
     timeout_ms: int = 8_000
     # How long to wait for a page to be ready after navigating.
     #
@@ -196,6 +208,16 @@ class CrawlConfig:
     # has no opinion about what anyone wants from a page.
     on_state: Callable[[object, object], None] | None = None
 
+    def __post_init__(self):
+        if min(self.max_states,self.max_actions,self.max_attempts,self.max_depth,self.max_seconds,self.progress_every)<0:
+            raise ValueError('crawl budgets must be nonnegative')
+        if self.restore_failure_limit<1 or self.timeout_ms<1:
+            raise ValueError('restoration retry limit and timeout must be positive')
+        if self.resume and not self.checkpoint_path:
+            raise ValueError('resuming requires a checkpoint path')
+        if self.retry_failed and not self.resume:
+            raise ValueError('retry_failed requires resume')
+
 
 # --------------------------------------------------------------------------
 # Crawler
@@ -207,19 +229,40 @@ class _FrontierItem:
     state_id: str
     affordance_key: str
     depth: int
+    kind: str = "click"
+    value: str | bool | None = None
 
 
-class Crawler:
+class Crawler(CheckpointMixin):
     """Drives a Playwright page to build an `AppGraph`."""
 
     def __init__(self, page, base_url: str, config: CrawlConfig | None = None):
         self.page = page
         self.base_url = base_url.rstrip("/")
         self.config = config or CrawlConfig()
+        self._original_page = page
+        self._owned_context = None
+        self._checkpoints = {}
+        self._node_refs = {}
+        self._choice_groups = set()
+        self._unsupported_frames = {}
+        self._active_recipe = []
+        self._active_item = None
+        self._task_results = {}
+        self.readables = {}
+        self._stop_reason = None
+        self._seed = None
+        self._elapsed_before = 0
         self.graph = AppGraph(base_url=self.base_url)
         self._frontier: deque[_FrontierItem] = deque()
         self._queued: set[tuple[str, str]] = set()
         self._actions_fired = 0
+        self._attempts = 0
+        self._restore_failures = {}
+        self._metrics = {"restore_ms": 0, "action_ms": 0, "restore_failures": 0, "suppressed_actions": 0,
+                         "checkpoint_hits": 0, "recipe_restores": 0}
+        for pattern in self.config.id_segment_patterns:
+            re.compile(pattern)
         # Where each affordance key has been fired from, and where it landed.
         # An affordance that lands in the same place from many different
         # states is navigation chrome, and re-firing it teaches nothing.
@@ -251,6 +294,14 @@ class Crawler:
         observer is a bystander, and a map is still worth having when
         something optional raised on one page.
         """
+        self._remember(state)
+        from urllib.parse import urlsplit
+        origin = urlsplit(self.base_url).netloc
+        self._unsupported_frames[state.id] = [f.url for f in self.page.frames
+            if f != self.page.main_frame and urlsplit(f.url).netloc == origin]
+        if state.id not in self.readables:
+            from discovery.readable import readable_with_page
+            self.readables[state.id] = readable_with_page(self.page)
         if self.config.on_state is None or state.visits != 1:
             return
         try:
@@ -261,24 +312,72 @@ class Crawler:
     # -- entry point -------------------------------------------------------
 
     def crawl(self, entry_path: str = "/") -> AppGraph:
+        self._entry_path = entry_path
+        self._entry_url = self.base_url + entry_path
+        self._started = time.monotonic()
+        self._run_attempts = self._attempts
+        self._run_actions = self._actions_fired
+        try:
+            return self._crawl(entry_path)
+        except KeyboardInterrupt:
+            self._stop_reason = 'interrupted'
+            self._save_checkpoint()
+            raise
+
+    def _crawl(self, entry_path: str) -> AppGraph:
+        started = time.monotonic()
+        stop_reason = None
         entry_url = self.base_url + entry_path
 
-        self._reset()
-        self._goto(entry_url)
-        entry_state = self._observe()
-        self._note_state(entry_state)
-        self.graph.entry = entry_state.id
-        self._say(f"entry {entry_state.id} {entry_state.url_template}")
-        self._enqueue(entry_state, depth=0)
+        if self.config.resume:
+            self._load_checkpoint()
+            self._run_attempts = self._attempts
+            self._run_actions = self._actions_fired
+            (self.config.on_progress or self._say)(f'resumed: {len(self.graph.states)} states, {len(self._frontier)} queued tasks')
+        if not self.graph.entry:
+            self._reset()
+            self._seed = self._browser_state()
+            self._goto(entry_url)
+            entry_state = self._observe()
+            self._note_state(entry_state)
+            self.graph.entry = entry_state.id
+            self._say(f"entry {entry_state.id} {entry_state.url_template}")
+            self._enqueue(entry_state, depth=0)
+        self._save_checkpoint()
 
         while self._frontier:
-            if len(self.graph.states) >= self.config.max_states:
+            if self.config.max_seconds and time.monotonic() - started >= self.config.max_seconds:
+                stop_reason = "max_seconds"
+                break
+            if self.config.max_attempts and self._attempts - self._run_attempts >= self.config.max_attempts:
+                stop_reason = "max_attempts"
+                break
+            if self.config.max_states and len(self.graph.states) >= self.config.max_states:
+                stop_reason = "max_states"
                 self._say(f"stopping: max_states ({self.config.max_states}) reached")
                 break
-            if self._actions_fired >= self.config.max_actions:
+            if self.config.max_actions and self._actions_fired - self._run_actions >= self.config.max_actions:
+                stop_reason = "max_actions"
                 self._say(f"stopping: max_actions ({self.config.max_actions}) reached")
                 break
-            self._explore(self._frontier.popleft())
+            from discovery.policy import priority
+            self._frontier = deque(sorted(self._frontier, key=lambda item: priority(item, self.graph)))
+            self._attempts += 1
+            self._active_item = self._frontier.popleft()
+            self._save_checkpoint()
+            try:
+                self._explore(self._active_item)
+            except Exception as exc:
+                self._record_task(self._active_item, 'action_failed', str(exc))
+                self._mark_unexplored(self._active_item.state_id, self._active_item.affordance_key)
+            self._active_item = None
+            self._save_checkpoint()
+            if self.config.progress_every and self._attempts % self.config.progress_every == 0:
+                self._refresh_metrics(None)
+                progress = self.config.on_progress or self._say
+                progress(f'progress: {len(self.graph.states)} states, {len(self._frontier)} queued, '
+                          f'{self._attempts} attempts; restore={self._metrics["restore_ms"]}ms, '
+                          f'action={self._metrics["action_ms"]}ms')
 
         # Anything still queued when a budget ran out is unexplored, and has
         # to be recorded as such — a graph that silently drops frontier items
@@ -286,10 +385,14 @@ class Crawler:
         for item in self._frontier:
             self._mark_unexplored(item.state_id, item.affordance_key)
 
+        self._refresh_metrics(stop_reason)
+        self._stop_reason = stop_reason or ('unresolved_actions' if not self.graph.is_closed() else 'exhausted')
+        self._refresh_metrics(self._stop_reason)
         self.graph.volatile = {
             template: sorted(signatures)
             for template, signatures in self._reader.volatile.items()
         }
+        self._save_checkpoint()
 
         self._say(
             f"done: {len(self.graph.states)} states, {len(self.graph.actions)} actions, "
@@ -303,6 +406,31 @@ class Crawler:
             )
         return self.graph
 
+    def _refresh_metrics(self, reason):
+        from collections import Counter
+        self.graph.metrics = {**self._metrics, 'attempted_actions': self._attempts,
+            'fired_actions': self._actions_fired, 'elapsed_seconds': round(self._elapsed_before+time.monotonic()-self._started,3),
+            'stop_reason': reason, 'queued_actions': len(self._frontier) + bool(self._active_item),
+            'walked_transitions': sum(not a.inferred for a in self.graph.actions),
+            'inferred_transitions': sum(a.inferred for a in self.graph.actions),
+            'task_statuses': dict(Counter(t['status'] for t in self._task_results.values())),
+            'unresolved_actions': sum(map(len,self.graph.unexplored.values())),
+            'id_segment_patterns': list(self.config.id_segment_patterns)}
+        self.graph.metrics['input_states'] = self.config.explore_inputs
+        self.graph.metrics['unsupported_frames'] = sum(map(len,self._unsupported_frames.values()))
+
+    def _record_task(self, item, status, detail=None):
+        item.state_id = self._live(item.state_id)
+        key = repr((item.state_id,item.affordance_key,item.kind,item.value))
+        self._task_results[key] = {'state':item.state_id,'action':item.affordance_key,
+            'kind':item.kind,'value':item.value,'status':status,'detail':detail}
+        self._task_results[key]['depth'] = item.depth
+        if status in ('executed', 'inferred'):
+            failed = any(t['state']==item.state_id and t['action']==item.affordance_key
+                         and t['status'] not in ('executed','inferred') for t in self._task_results.values())
+            if not failed and item.affordance_key in self.graph.unexplored.get(item.state_id, []):
+                self.graph.unexplored[item.state_id].remove(item.affordance_key)
+
     # -- the loop ----------------------------------------------------------
 
     def _explore(self, item: _FrontierItem) -> None:
@@ -312,6 +440,10 @@ class Crawler:
         affordance = state.affordances.get(item.affordance_key)
         if affordance is None:
             return
+        if self.config.max_depth and item.depth>self.config.max_depth:
+            self._record_task(item,'depth_limited','depth budget')
+            self._mark_unexplored(state.id,affordance.key)
+            return
 
         # Checked here as well as at enqueue time. `_enqueue` keeps buttons out
         # of the frontier, but an edge inferred as site-wide navigation or a
@@ -319,11 +451,13 @@ class Crawler:
         # and a read-only guarantee that depends on one code path holding is
         # not a guarantee.
         if self.config.read_only and affordance.kind != "link":
+            self._record_task(item, 'unsupported', 'read-only policy')
             self._say(f"  skip (read-only, would submit): {affordance.label}")
             self._mark_unexplored(state.id, affordance.key)
             return
 
         if self._is_destructive(affordance):
+            self._record_task(item, 'unsupported', 'destructive-action policy')
             self._say(f"  skip (destructive): {affordance.label}")
             self._mark_unexplored(state.id, affordance.key)
             return
@@ -331,7 +465,9 @@ class Crawler:
         # Site-wide navigation: already proven to behave identically from
         # enough states that firing it again is a browser round-trip spent
         # re-learning a known fact. Record the edge and move on.
-        known_target = self._global.get(affordance.key)
+        from discovery.policy import navigation_key
+        nav_key = navigation_key(affordance, state) if item.kind == 'click' else None
+        known_target = self._global.get(nav_key) if nav_key else None
         if known_target is not None and known_target != state.id:
             self.graph.connect(Action(
                 source=state.id,
@@ -341,20 +477,39 @@ class Crawler:
                 effects=("site-wide navigation",),
                 inferred=True,
             ))
+            self._record_task(item, 'inferred')
             return
 
-        if not self._establish(state):
+        if self._restore_failures.get(state.id, 0) >= self.config.restore_failure_limit:
+            self._record_task(item, 'suppressed', 'restoration retry limit')
+            self._mark_unexplored(state.id, affordance.key)
+            self._metrics["suppressed_actions"] += 1
+            return
+        restore_started = time.monotonic()
+        established = self._establish(state)
+        self._metrics["restore_ms"] += int((time.monotonic() - restore_started) * 1000)
+        if not established:
+            self._record_task(item, 'restoration_failed')
+            self._restore_failures[state.id] = self._restore_failures.get(state.id, 0) + 1
+            self._metrics["restore_failures"] += 1
             self._say(f"  could not return to {state.id}; leaving {affordance.label} unexplored")
             self._mark_unexplored(state.id, affordance.key)
             return
 
-        inputs = self._fill_form(state, affordance)
+        inputs = self._fill_form(state, affordance) if item.kind == 'click' else {}
 
         before = self._identify(inspect_with_page(self.page))
-        if not self._fire(affordance):
+        action_started = time.monotonic()
+        step = {'source':state.id, 'affordance':affordance.to_dict(),
+                'inputs':list(inputs.items()), 'kind':item.kind, 'value':item.value}
+        fired = self._perform(affordance, item.kind, item.value)
+        self._metrics["action_ms"] += int((time.monotonic() - action_started) * 1000)
+        if not fired:
+            self._record_task(item, 'action_failed')
             self._mark_unexplored(state.id, affordance.key)
             return
         self._actions_fired += 1
+        self._active_recipe = list(self._checkpoints.get(state.id, {}).get('recipe', self._active_recipe)) + [step]
 
         after_snapshot, after = self._read()
 
@@ -367,7 +522,8 @@ class Crawler:
         # A link's href can be checked before clicking; a button's destination
         # cannot. If firing one left the region under test, record where it
         # went but do not explore onward from there.
-        if self._is_excluded(after_snapshot.get("url")):
+        if not self._is_same_origin(after_snapshot.get("url")) or self._is_excluded(after_snapshot.get("url")):
+            self._record_task(item, 'outside_region')
             self._say(f"  {affordance.label!r} -> outside region, not followed")
             self._mark_out_of_region(source_id, affordance.key)
             return
@@ -383,14 +539,18 @@ class Crawler:
             label=affordance.label,
             inputs=tuple(sorted(inputs.items())),
             effects=effects,
+            kind=item.kind,
+            value=item.value,
         ))
+        self._record_task(item, 'executed')
 
         arrow = "self" if target.id == source_id else target.id
         self._say(f"  {affordance.label!r} -> {arrow} {target.url_template}")
 
-        self._note_outcome(affordance.key, source_id, target.id)
+        if nav_key:
+            self._note_outcome(nav_key, source_id, target.id)
 
-        if target.visits == 1 and item.depth + 1 <= self.config.max_depth:
+        if target.visits == 1:
             self._enqueue(target, depth=item.depth + 1)
 
     def _note_outcome(self, key: str, source: str, target: str) -> None:
@@ -427,6 +587,13 @@ class Crawler:
         """
         for key, affordance in state.affordances.items():
             if affordance.kind == "field":
+                if self.config.explore_inputs and not self.config.read_only:
+                    self._enqueue_choices(state, affordance, depth)
+                else:
+                    element = next((e for e in (state.snapshot or {}).get('elements',[]) if e.get('id')==affordance.element_id),{})
+                    if element.get('tag')=='select' or element.get('type') in ('radio','checkbox'):
+                        self._record_task(_FrontierItem(state.id,key,depth),'unsupported','input choices disabled by policy')
+                        self._mark_unexplored(state.id,key)
                 continue
             # Under read-only, anything that is not a link is recorded as
             # unexplored rather than silently dropped. That is what keeps
@@ -436,15 +603,49 @@ class Crawler:
                 self._mark_unexplored(state.id, key)
                 continue
             if affordance.kind == "link" and not self._is_same_origin(affordance.href):
+                self._mark_out_of_region(state.id, key)
                 continue
             if self._is_excluded(affordance.href):
                 self._mark_out_of_region(state.id, key)
                 continue
-            pair = (state.id, key)
+            pair = (state.id, key, 'click', None)
             if pair in self._queued:
                 continue
             self._queued.add(pair)
             self._frontier.append(_FrontierItem(state.id, key, depth))
+
+    def _enqueue_choices(self, state, affordance, depth):
+        element = next((e for e in (state.snapshot or {}).get('elements', []) if e.get('id')==affordance.element_id), {})
+        kind = None
+        if element.get('tag') == 'select':
+            if element.get('multiple') or element.get('role')=='listbox':
+                self._record_task(_FrontierItem(state.id,affordance.key,depth),'unsupported','multi-select combinations require an explicit fixture')
+                self._mark_unexplored(state.id,affordance.key)
+                return
+            locator = self.page.locator(affordance.selector)
+            values = locator.locator('option').evaluate_all('es=>es.filter(e=>!e.disabled).map(e=>e.value)')
+            kind = 'select'
+        elif element.get('type') in ('radio','checkbox'):
+            values = [True] if element.get('type')=='radio' else [False, True]
+            kind = 'check'
+        else:
+            if element.get('role') in ('switch','combobox','listbox','slider'):
+                self._record_task(_FrontierItem(state.id,affordance.key,depth),'unsupported','custom widget requires an explicit fixture')
+                self._mark_unexplored(state.id,affordance.key)
+            return  # text inputs are filled as part of submit actions
+        structural = dict(state.snapshot or {})
+        structural.pop('input_state',None)
+        group = (self._reader.identify(structural).id, affordance.key)
+        if group in self._choice_groups:
+            return
+        self._choice_groups.add(group)
+        for value in values:
+            if (kind=='select' and value==element.get('value')) or (kind=='check' and value==element.get('checked')):
+                continue
+            pair = (state.id,affordance.key,kind,value)
+            if pair not in self._queued:
+                self._queued.add(pair)
+                self._frontier.append(_FrontierItem(state.id,affordance.key,depth,kind,value))
 
     # -- getting into a state ---------------------------------------------
 
@@ -455,6 +656,8 @@ class Crawler:
         want, nothing needs doing. That happens whenever an action lands
         somewhere with several affordances left to try.
         """
+        if state.id in self._checkpoints:
+            return self._restore_checkpoint(state)
         try:
             if self._identify(inspect_with_page(self.page)).id == state.id:
                 return True
@@ -547,6 +750,10 @@ class Crawler:
             pass
         if self.config.settle_ms:
             self.page.wait_for_timeout(self.config.settle_ms)
+        if self.config.readiness:
+            from knowledge.contracts import UIAssertion
+            from runner.contract_checks import assert_ui
+            assert_ui(self.page,[UIAssertion.model_validate(item) for item in self.config.readiness],self.config.timeout_ms)
 
     def _snapshot(self) -> dict:
         self._settle()
@@ -561,7 +768,12 @@ class Crawler:
         signature and a caller using the raw rule would disagree with the
         graph about which state it was standing in.
         """
-        return self._reader.identify(snapshot)
+        from discovery.policy import identity_snapshot
+        return self._reader.identify(self._identity_snapshot(snapshot))
+
+    def _identity_snapshot(self, snapshot):
+        from discovery.policy import identity_snapshot
+        return identity_snapshot(snapshot, self.config.id_segment_patterns, self.config.explore_inputs)
 
     def _read(self, snapshot: dict | None = None) -> tuple[dict, Fingerprint]:
         """Read the page, paying for certainty only when it is about to matter.
@@ -574,6 +786,7 @@ class Crawler:
         """
         if snapshot is None:
             snapshot = self._snapshot()
+        snapshot = self._identity_snapshot(snapshot)
         if not self._reader.enabled:
             return snapshot, self._identify(snapshot)
 
@@ -586,7 +799,7 @@ class Crawler:
 
         before = self._reader.volatile.get(template)
         snapshot, print_id = self._reader.settle(
-            lambda: inspect_with_page(self.page),
+            lambda: self._identity_snapshot(inspect_with_page(self.page)),
             self.page.wait_for_timeout,
             snapshot,
         )
@@ -622,12 +835,14 @@ class Crawler:
                 rekeyed.get(item.state_id, item.state_id),
                 item.affordance_key,
                 item.depth,
+                item.kind,
+                item.value,
             )
             for item in self._frontier
         )
         self._queued = {
-            (rekeyed.get(state_id, state_id), key)
-            for state_id, key in self._queued
+            (rekeyed.get(pair[0], pair[0]), *pair[1:])
+            for pair in self._queued
         }
         self._observed_sources = {
             key: {rekeyed.get(s, s) for s in sources}
@@ -642,6 +857,13 @@ class Crawler:
             for key, target in self._global.items()
         }
         self._rekeyed.update(rekeyed)
+        for old,new in rekeyed.items():
+            if old in self._checkpoints:
+                self._checkpoints.setdefault(new,self._checkpoints[old])
+            if old in self.readables:
+                self.readables.setdefault(new,self.readables[old])
+            if old in self._restore_failures:
+                self._restore_failures[new] = max(self._restore_failures.get(new,0),self._restore_failures[old])
         merged = len(set(rekeyed) - set(rekeyed.values()))
         self._say(f"  [unstable] folded {merged} duplicate state(s) back together")
 
@@ -679,7 +901,7 @@ class Crawler:
     def _fire(self, affordance: Affordance) -> bool:
         """Click an affordance. False when it could not be actioned at all."""
         try:
-            locator = locate(self.page, affordance)
+            locator = self._locator(affordance)
             locator.wait_for(state="visible", timeout=self.config.timeout_ms)
             self._preview(locator, caption_for("click", affordance.label), "click")
             locator.click(timeout=self.config.timeout_ms)
@@ -690,6 +912,41 @@ class Crawler:
             self._unpreview()
         self._settle()
         return True
+
+    def _locator(self, affordance):
+        if affordance.selector:
+            locator = self.page.locator(affordance.selector)
+            if locator.count()==1:
+                return locator
+        from runner.locators import resolve
+        return resolve(self.page, affordance, self.config.timeout_ms)
+
+    def _perform(self, affordance, kind='click', value=None):
+        if kind=='click':
+            return self._fire(affordance)
+        try:
+            locator = self._locator(affordance)
+            if kind=='select':
+                locator.select_option(str(value),timeout=self.config.timeout_ms)
+            elif kind=='check':
+                if locator.is_checked(timeout=self.config.timeout_ms) != value:
+                    locator.click(timeout=self.config.timeout_ms)
+            else:
+                return False
+            self._settle()
+            return True
+        except Exception as exc:
+            self._say(f'could not {kind} {affordance.label!r}: {exc}')
+            return False
+
+    def _execute_saved(self, step):
+        source = self.graph.states.get(self._live(step['source']))
+        if source is None:
+            return False
+        for key,value in step['inputs']:
+            if not self._fill_one(key,value,source.affordances.get(key)):
+                return False
+        return self._perform(Affordance.from_dict(step['affordance']),step['kind'],step['value'])
 
     def _fill_form(self, state: State, affordance: Affordance) -> dict[str, str]:
         """Fill every field in the state before firing a submit.
@@ -738,7 +995,7 @@ class Crawler:
     def _value_for(self, affordance: Affordance) -> str | None:
         """Pick a value for a field from its type and label."""
         strategy = affordance.locator or {}
-        label = (affordance.label or "").lower()
+        label = re.sub(r"[^a-z0-9 ]", "", (affordance.label or "").lower())
         role = strategy.get("role", "")
 
         # Non-text controls are left alone. Selects already carry a default,
@@ -748,7 +1005,7 @@ class Crawler:
             return None
 
         for name, value in self.config.credentials.items():
-            if name in label:
+            if re.sub(r"[^a-z0-9 ]", "", name.lower()) in label:
                 return value
 
         for hint, value in DEFAULT_VALUES.items():
@@ -772,9 +1029,10 @@ class Crawler:
     def _is_same_origin(self, href: str | None) -> bool:
         if not href or not self.config.same_origin_only:
             return True
-        if href.startswith("/") or href.startswith("#"):
-            return True
-        return href.startswith(self.base_url)
+        from urllib.parse import urljoin, urlsplit
+        target=urlsplit(urljoin(self.base_url+'/',href))
+        base=urlsplit(self.base_url)
+        return (target.scheme,target.netloc)==(base.scheme,base.netloc)
 
     def _is_excluded(self, url: str | None) -> bool:
         """Whether a destination is outside the region being crawled."""
@@ -871,6 +1129,13 @@ if __name__ == "__main__":
     parser.add_argument("--out", default="runs/graphs/graph.json")
     parser.add_argument("--max-states", type=int, default=60)
     parser.add_argument("--max-actions", type=int, default=400)
+    parser.add_argument('--max-depth',type=int,default=10)
+    parser.add_argument('--max-attempts',type=int,default=2000)
+    parser.add_argument('--crawl-seconds',type=float,default=120)
+    parser.add_argument('--crawl-checkpoint')
+    parser.add_argument('--resume-crawl')
+    parser.add_argument('--retry-crawl-failures',action='store_true')
+    parser.add_argument('--no-input-choices',action='store_true')
     parser.add_argument("--headed", action="store_true")
     parser.add_argument("--slow-mo", type=int, default=0, metavar="MS",
                         help="pause this many ms before each browser action; "
@@ -921,6 +1186,10 @@ if __name__ == "__main__":
                              f"{DEFAULT_GAP_MS}). The window they span must "
                              f"exceed the animation's period to see it move")
     args = parser.parse_args()
+    if args.resume_crawl and (args.repeat!=1 or args.crawl_checkpoint):
+        parser.error('--resume-crawl requires one run and cannot use --crawl-checkpoint')
+    if args.retry_crawl_failures and not args.resume_crawl:
+        parser.error('--retry-crawl-failures requires --resume-crawl')
 
     # Boxing controls in a browser nobody can see is pure cost, and asking
     # for the box is unambiguously asking to watch.
@@ -950,6 +1219,10 @@ if __name__ == "__main__":
             config=CrawlConfig(
                 max_states=args.max_states,
                 max_actions=args.max_actions,
+                max_depth=args.max_depth,max_attempts=args.max_attempts,max_seconds=args.crawl_seconds,
+                checkpoint_path=args.resume_crawl or args.crawl_checkpoint or args.out+'.crawl.json',
+                resume=bool(args.resume_crawl),retry_failed=args.retry_crawl_failures,
+                explore_inputs=not args.no_input_choices,
                 deny_destructive=args.safe,
                 exclude_prefixes=tuple(args.exclude),
                 stay_under=args.stay_under,

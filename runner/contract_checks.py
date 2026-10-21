@@ -6,13 +6,21 @@ from playwright.sync_api import expect
 
 def assert_ui(page, conditions, timeout):
     for check in conditions:
-        locator = page.locator(check.selector)
+        from runner.locators import scope
+        locator = scope(page, check.frame).locator(check.selector)
         assertion = expect(locator)
         if check.kind == "visible":
             if check.expected:
                 assertion.to_be_visible(timeout=timeout)
             else:
                 assertion.to_be_hidden(timeout=timeout)
+        elif check.kind == "checked":
+            assertion.to_be_checked(checked=bool(check.expected), timeout=timeout)
+        elif check.kind == "enabled":
+            if check.expected:
+                assertion.to_be_enabled(timeout=timeout)
+            else:
+                assertion.to_be_disabled(timeout=timeout)
         elif check.kind == "count":
             assertion.to_have_count(check.expected, timeout=timeout)
         elif check.kind == "text":
@@ -23,7 +31,8 @@ def assert_ui(page, conditions, timeout):
 
 def act(page, actions, timeout):
     for action in actions:
-        locator = page.locator(action.selector)
+        from runner.locators import scope
+        locator = scope(page, action.frame).locator(action.selector)
         expect(locator).to_have_count(1, timeout=timeout)
         if action.kind == "click":
             locator.click(timeout=timeout)
@@ -33,6 +42,7 @@ def act(page, actions, timeout):
             locator.select_option(action.value, timeout=timeout)
         elif action.kind == "check":
             locator.set_checked(action.value, timeout=timeout)
+        assert_ui(page, action.ready, timeout)
 
 
 def api_outcomes(page, instance, contract, notes):

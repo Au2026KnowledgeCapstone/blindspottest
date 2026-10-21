@@ -238,6 +238,8 @@ class Action:
     # and the crawl affordable — but a planner relying on one should know it
     # was never actually exercised.
     inferred: bool = False
+    kind: str = "click"
+    value: str | bool | None = None
 
     @property
     def is_self_loop(self) -> bool:
@@ -254,6 +256,8 @@ class Action:
             "requires": list(self.requires),
             "establishes": list(self.establishes),
             "inferred": self.inferred,
+            "kind": self.kind,
+            "value": self.value,
         }
 
     @classmethod
@@ -268,6 +272,8 @@ class Action:
             requires=tuple(data.get("requires", ())),
             establishes=tuple(data.get("establishes", ())),
             inferred=data.get("inferred", False),
+            kind=data.get("kind", "click"),
+            value=data.get("value"),
         )
 
 
@@ -301,6 +307,7 @@ class AppGraph:
     # a page with no stable identity is a page whose regressions are hard to
     # trust, and a reader of the map is entitled to know which ones they are.
     volatile: dict[str, list[str]] = field(default_factory=dict)
+    metrics: dict = field(default_factory=dict)
 
     # -- construction ------------------------------------------------------
 
@@ -416,7 +423,11 @@ class AppGraph:
                 and existing.target == action.target
                 and existing.affordance_key == action.affordance_key
                 and existing.inputs == action.inputs
+                and existing.kind == action.kind
+                and existing.value == action.value
             ):
+                if existing.inferred and not action.inferred:
+                    self.actions[self.actions.index(existing)] = action
                 return
         self.actions.append(action)
 
@@ -447,7 +458,8 @@ class AppGraph:
         Only a closed graph licenses a negative result — "no path exists to
         this goal" rather than "I did not happen to find one".
         """
-        return not any(self.unexplored.values())
+        return (not any(self.unexplored.values()) and not self.metrics.get('queued_actions',0)
+                and not self.metrics.get('unsupported_frames',0))
 
     def path_to(self, target: str) -> list[Action] | None:
         """Shortest action sequence from the entry to `target`, if one exists."""
@@ -511,6 +523,7 @@ class AppGraph:
             "unexplored": {k: v for k, v in self.unexplored.items() if v},
             "out_of_region": {k: v for k, v in self.out_of_region.items() if v},
             "volatile": {k: sorted(v) for k, v in self.volatile.items() if v},
+            "metrics": self.metrics,
         }
 
     def save(self, path: Path | str) -> Path:
@@ -529,6 +542,7 @@ class AppGraph:
             unexplored=data.get("unexplored", {}),
             out_of_region=data.get("out_of_region", {}),
             volatile=data.get("volatile", {}),
+            metrics=data.get("metrics", {}),
         )
 
     @classmethod

@@ -144,7 +144,7 @@ class BrowserContracts(unittest.TestCase):
             baseline = root / "v1"
             common = [sys.executable, "main.py", "--entry", "/cart", "--runs-dir", str(root / "runs"), "--timeout", "1000"]
             recorded = subprocess.run(common + ["--baseline", "--baseline-dir", str(baseline),
-                "--flow-candidates", str(candidates), "--contracts", str(contracts),
+                "--expectation-mode", "rules", "--flow-candidates", str(candidates), "--contracts", str(contracts),
                 "--export-contracts", str(root / "export.json"), self.base], capture_output=True, text=True)
             self.assertEqual(recorded.returncode, 0, recorded.stdout + recorded.stderr)
             self.assertEqual(json.loads((root / "export.json").read_text())[i.test_id]['review_status'], 'confirmed')
