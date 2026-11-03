@@ -1,0 +1,197 @@
+{
+  "version": 1,
+  "checklists": [
+    {
+      "id": "AUTH-001",
+      "title": "Successful login",
+      "category": "authentication",
+      "description": "A user can authenticate using valid credentials.",
+      "priority": "critical",
+      "version": 1,
+      "preconditions": [
+        "A test account exists",
+        "Valid test credentials are available"
+      ],
+      "steps": [
+        "Reach the login interface",
+        "Enter valid credentials",
+        "Submit the login form",
+        "Reach an authenticated area"
+      ],
+      "goal_conditions": [
+        "The user is authenticated",
+        "The authenticated area is accessible"
+      ],
+      "tags": ["login", "authentication", "positive"]
+    },
+    {
+      "id": "AUTH-002",
+      "title": "Reject invalid login",
+      "category": "authentication",
+      "description": "Invalid credentials must not authenticate a user.",
+      "priority": "critical",
+      "version": 1,
+      "preconditions": [
+        "The login interface is accessible",
+        "Invalid test credentials are available"
+      ],
+      "steps": [
+        "Reach the login interface",
+        "Enter invalid credentials",
+        "Submit the login form"
+      ],
+      "goal_conditions": [
+        "Authentication is rejected",
+        "The user remains unauthenticated"
+      ],
+      "tags": ["login", "authentication", "negative"]
+    },
+    {
+      "id": "AUTH-003",
+      "title": "Logout",
+      "category": "authentication",
+      "description": "An authenticated user can end their session.",
+      "priority": "high",
+      "version": 1,
+      "preconditions": [
+        "A test user is authenticated"
+      ],
+      "steps": [
+        "Reach an authenticated area",
+        "Trigger the logout action"
+      ],
+      "goal_conditions": [
+        "The session is ended",
+        "Protected content is no longer accessible"
+      ],
+      "tags": ["logout", "authentication", "session"]
+    },
+    {
+      "id": "AUTH-004",
+      "title": "Password recovery",
+      "category": "authentication",
+      "description": "A user can initiate password recovery.",
+      "priority": "high",
+      "version": 1,
+      "preconditions": [
+        "Password recovery is available",
+        "A controlled test account exists"
+      ],
+      "steps": [
+        "Reach the password recovery interface",
+        "Enter the test account identifier",
+        "Submit the recovery request"
+      ],
+      "goal_conditions": [
+        "The recovery request receives the expected confirmation"
+      ],
+      "tags": ["password", "recovery", "authentication"]
+    },
+    {
+      "id": "CRUD-001",
+      "title": "Create a record",
+      "category": "data-management",
+      "description": "A user can create a new record.",
+      "priority": "high",
+      "version": 1,
+      "preconditions": [
+        "The user has permission to create records"
+      ],
+      "steps": [
+        "Reach the relevant record collection",
+        "Open the create interface",
+        "Enter valid record data",
+        "Submit the create form"
+      ],
+      "goal_conditions": [
+        "The new record is displayed",
+        "The record can be retrieved after creation"
+      ],
+      "tags": ["create", "crud", "persistence"]
+    },
+    {
+      "id": "CRUD-002",
+      "title": "Edit an existing record",
+      "category": "data-management",
+      "description": "A user can update and save an existing record.",
+      "priority": "high",
+      "version": 1,
+      "preconditions": [
+        "An editable test record exists"
+      ],
+      "steps": [
+        "Reach the record",
+        "Open the edit interface",
+        "Change a record field",
+        "Save the changes"
+      ],
+      "goal_conditions": [
+        "The updated value is displayed",
+        "The change persists after revisiting the record"
+      ],
+      "tags": ["edit", "update", "crud", "persistence"]
+    },
+    {
+      "id": "CRUD-003",
+      "title": "Delete a record",
+      "category": "data-management",
+      "description": "A user can delete an eligible test record.",
+      "priority": "high",
+      "version": 1,
+      "preconditions": [
+        "A disposable test record exists",
+        "The user has permission to delete records"
+      ],
+      "steps": [
+        "Reach the test record",
+        "Trigger the delete action",
+        "Confirm deletion if required"
+      ],
+      "goal_conditions": [
+        "The record is no longer available"
+      ],
+      "tags": ["delete", "crud", "destructive"]
+    },
+    {
+      "id": "FORM-001",
+      "title": "Required field validation",
+      "category": "forms",
+      "description": "A form rejects submission when required data is missing.",
+      "priority": "high",
+      "version": 1,
+      "preconditions": [
+        "A form with required fields exists"
+      ],
+      "steps": [
+        "Reach the form",
+        "Leave a required field empty",
+        "Submit the form"
+      ],
+      "goal_conditions": [
+        "The invalid submission is rejected",
+        "Appropriate validation feedback is displayed"
+      ],
+      "tags": ["forms", "validation", "negative"]
+    },
+    {
+      "id": "SEARCH-001",
+      "title": "Search for a record",
+      "category": "search",
+      "description": "A user can search for an existing record.",
+      "priority": "medium",
+      "version": 1,
+      "preconditions": [
+        "A known test record exists"
+      ],
+      "steps": [
+        "Reach the search interface",
+        "Enter a query matching the test record",
+        "Submit the search"
+      ],
+      "goal_conditions": [
+        "The expected record appears in the results"
+      ],
+      "tags": ["search", "results", "retrieval"]
+    }
+  ]
+}
